@@ -35,6 +35,7 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
       # Uncomment after configuring PyPI trusted publishing for this repository.
       # - name: Publish to PyPI
       #   uses: pypa/gh-action-pypi-publish@release/v1
