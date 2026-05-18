@@ -1,4 +1,4 @@
-# Message Lifecycle
+﻿# Message Lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -40,3 +40,7 @@ The bridge deduplicates by event ID. Replayed webhook events should be acknowled
 ## Delivery Governance
 
 The Weixin Delivery Governor sits below friendly reply formatting and above the actual sender. It learns a safe per-window send budget, counts failed attempts, opens a circuit after `ret=-2`/`errcode=-2`, and releases queued messages by priority in later windows. Low-priority queued notices expire first so stale background alerts do not crowd out fresh user-facing updates.
+
+## Runtime Notifications
+
+Cron failures, Guardian incidents, and direct operational notifications enter through `BridgeNotifier` or the specific Cron/Guardian adapters. The adapters first render a friendly card, then pass the card through the governor. If the governor queues the message, callers receive a local/Web UI friendly status instead of sending a second WeChat message about WeChat being rate limited.

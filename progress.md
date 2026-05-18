@@ -59,3 +59,5 @@
 - Complete: pytest, CLI doctor, CLI simulator, secret scan, cache cleanup.
 
 [2026-05-18 17:50:16 +08:00] Added Weixin Delivery Governor, config knobs, sender integration, docs, and contract tests.
+
+[2026-05-18 19:03:28 +08:00] Runtime notification completeness: added friendly-card templates, BridgeNotifier, CronDeliveryNotifier, GuardianDeliveryNotifier, CLI notify/flush, sender transport + queued flush support, and contract tests so open-source users get the same governed notification behavior as local Hermes deployments. Validation: py_compile passed; ruff check bridge tests passed; pytest tests passed (32 passed); CLI notify/flush smoke passed in dry-run mode.

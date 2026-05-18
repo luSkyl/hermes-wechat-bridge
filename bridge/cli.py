@@ -1,4 +1,4 @@
-"""Command-line interface for Hermes WeChat Bridge."""
+﻿"""Command-line interface for Hermes WeChat Bridge."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from bridge.hermes import HermesClient
 from bridge.runtime.config import load_config
 from bridge.runtime.diagnostics import run_diagnostics
 from bridge.runtime.router import GatewayRouter
+from bridge.runtime.service import BridgeService
 from bridge.server import serve
 from bridge.wechat import WeChatAdapter, WeChatSender
 
@@ -31,6 +32,18 @@ def main(argv: list[str] | None = None) -> int:
     serve_parser.add_argument("--host", default="127.0.0.1", help="bind host")
     serve_parser.add_argument("--port", type=int, default=8787, help="bind port")
 
+    notify_parser = subparsers.add_parser("notify", help="send or queue a governed friendly-card notification")
+    notify_parser.add_argument("--config", required=True, help="path to config YAML")
+    notify_parser.add_argument("--target", required=True, help="WeChat recipient / conversation id")
+    notify_parser.add_argument("--text", required=True, help="notification text; wrapped into the friendly-card template")
+    notify_parser.add_argument("--title", default="通知已接收", help="friendly-card title")
+    notify_parser.add_argument("--priority", default="normal", choices=["low", "normal", "high", "critical"])
+
+    flush_parser = subparsers.add_parser("flush", help="flush queued governed notifications for a target")
+    flush_parser.add_argument("--config", required=True, help="path to config YAML")
+    flush_parser.add_argument("--target", required=True, help="WeChat recipient / conversation id")
+    flush_parser.add_argument("--limit", type=int, default=None, help="maximum queued notifications to send")
+
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.config)
@@ -39,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         serve(args.config, host=args.host, port=args.port)
         return 0
+    if args.command == "notify":
+        return _notify(args.config, args.target, args.text, args.title, args.priority)
+    if args.command == "flush":
+        return _flush(args.config, args.target, args.limit)
     parser.error("unknown command")
     return 2
 
@@ -59,6 +76,21 @@ def _simulate(config_path: str, event_path: str) -> int:
     result = router.handle_event(event)
     _print_json(result.to_dict())
     return 0 if result.status in {"delivered", "duplicate"} else 1
+
+
+def _notify(config_path: str, target: str, text: str, title: str, priority: str) -> int:
+    service = BridgeService(load_config(config_path))
+    result = service.send_notification(target_id=target, text=text, title=title, priority=priority)
+    _print_json(result.to_dict())
+    return 0 if result.ok else 1
+
+
+def _flush(config_path: str, target: str, limit: int | None) -> int:
+    service = BridgeService(load_config(config_path))
+    results = service.flush_notifications(target_id=target, limit=limit)
+    payload = {"ok": all(item.ok for item in results), "count": len(results), "results": [item.to_dict() for item in results]}
+    _print_json(payload)
+    return 0 if payload["ok"] else 1
 
 
 def _print_json(payload: dict[str, object]) -> None:

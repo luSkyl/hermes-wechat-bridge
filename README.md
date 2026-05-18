@@ -1,4 +1,4 @@
-# Hermes WeChat Bridge
+﻿# Hermes WeChat Bridge
 
 [![CI](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml)
@@ -31,6 +31,7 @@ Most WeChat integrations become hard to maintain because channel-specific code l
 - **Stable bridge contract**: normalized message protocol between WeChat and Hermes.
 - **Safe local development**: simulator fixtures run without real WeChat credentials.
 - **Production guardrails**: signature verification, service API token checks, retry, dedupe, delivery governor, and health/status endpoints.
+- **Complete notification loop**: friendly-card templates, `send_message_tool`-style notifier, Cron adapter, Guardian adapter, governed queue, and flush API.
 - **Upgrade-friendly boundary**: compatibility tests and docs make Hermes/Hermes Web UI upgrades contract-driven.
 - **Open-source ready workflow**: CI, CodeQL, Scorecard, Dependabot, release assets, governance, and security policy.
 
@@ -47,6 +48,8 @@ python -m pip install -e .[dev]
 python -m bridge.cli doctor --config examples/minimal/config.yaml
 python -m bridge.cli simulate --config examples/minimal/config.yaml --event simulator/sample_events/text.json
 python -m bridge.cli serve --config examples/minimal/config.yaml --host 127.0.0.1 --port 8787
+python -m bridge.cli notify --config examples/minimal/config.yaml --target wxid_home --title "上游模型已恢复" --text "模型恢复后需要重新执行定时任务。" --priority high
+python -m bridge.cli flush --config examples/minimal/config.yaml --target wxid_home --limit 3
 ```
 
 Expected simulator output includes a delivered dry-run reply from the bridge runtime:
@@ -117,6 +120,7 @@ When binding to a non-loopback host, `runtime.service_api_token` is required so 
 - [Architecture](docs/architecture.md)
 - [Gateway Flow](docs/gateway-flow.md)
 - [Message Lifecycle](docs/message-lifecycle.md)
+- [Runtime Notifications](docs/runtime-notifications.md)
 - [Failure Modes](docs/failure-modes.md)
 - [Sync Strategy](docs/sync-strategy.md)
 - [Compatibility Matrix](docs/compatibility-matrix.md)

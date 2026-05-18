@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to Hermes WeChat Bridge will be documented in this file.
 
@@ -9,6 +9,7 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 ### Added
 
 - File-backed Weixin Delivery Governor for outbound send-attempt budgeting, queueing, priority flush, and circuit breaking after rate-limit signals.
+- Runtime notification adapters for `send_message_tool`-style sends, Cron failures/recoveries, Guardian incidents/recoveries, friendly-card templates, CLI `notify`, and CLI `flush`.
 - Governor configuration keys in example configs and runtime config parsing.
 - Contract tests for quota windows, rate-limit breaker behavior, half-open canary attempts, priority queueing, stale expiration, and friendly user-visible cards.
 

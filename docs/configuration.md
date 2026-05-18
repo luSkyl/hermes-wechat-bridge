@@ -1,4 +1,4 @@
-# Configuration
+﻿# Configuration
 
 Configuration is a small YAML-like file. The built-in parser supports simple nested mappings used by the examples. If `PyYAML` is installed, full YAML parsing is used.
 
@@ -46,6 +46,12 @@ runtime:
 - `governor_state_dir`: optional file-backed state directory; omit it to use the bridge state directory.
 
 When the governor is open, user-visible content must be a friendly card or local/Web UI status. Do not send a WeChat message just to explain that WeChat is rate limited.
+
+## Runtime Notification Adapters
+
+Use `BridgeNotifier` for direct `send_message_tool`-style notifications, `CronDeliveryNotifier` for scheduled-task alerts, and `GuardianDeliveryNotifier` for watchdog incidents. These adapters always render friendly cards before calling `WeChatSender`, so raw stack traces, `ret=-2`, and transport errors are not sent to chat.
+
+Run `python -m bridge.cli notify --config <config> --target <chat-id> --text <message>` to send or queue a governed friendly-card notification, and `python -m bridge.cli flush --config <config> --target <chat-id>` to release queued cards in a later window.
 
 ## Production Notes
 

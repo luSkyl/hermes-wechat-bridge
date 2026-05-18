@@ -1,4 +1,4 @@
-"""In-process stable service API helpers used by tests and future UI adapters."""
+﻿"""In-process stable service API helpers used by tests and future UI adapters."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from bridge.hermes import HermesClient
 from bridge.protocol import DeliveryRequest, DeliveryResult, SessionRef
 from bridge.runtime.config import BridgeConfig
 from bridge.runtime.diagnostics import run_diagnostics
+from bridge.runtime.notifier import BridgeNotifier
 from bridge.runtime.router import GatewayRouter, RouteResult
 from bridge.wechat import WeChatAdapter, WeChatSender
 
@@ -17,6 +18,7 @@ class BridgeService:
         self.config = config
         self.adapter = WeChatAdapter(config.wechat)
         self.sender = WeChatSender(config.wechat)
+        self.notifier = BridgeNotifier(self.sender)
         self.router = GatewayRouter(config=config, hermes=HermesClient(config.hermes), sender=self.sender)
 
     def health(self) -> dict[str, object]:
@@ -31,8 +33,24 @@ class BridgeService:
             "wechat_dry_run": self.config.wechat.dry_run,
         }
 
+    def delivery_status(self) -> dict[str, object]:
+        return self.notifier.status()
+
     def simulate(self, payload: dict[str, object]) -> RouteResult:
         return self.router.handle_event(self.adapter.normalize(payload))
+
+    def send_notification(
+        self,
+        *,
+        target_id: str,
+        text: str,
+        title: str = "通知已接收",
+        priority: str = "normal",
+    ) -> DeliveryResult:
+        return self.notifier.notify_text(target_id=target_id, text=text, title=title, priority=priority)
+
+    def flush_notifications(self, *, target_id: str, limit: int | None = None) -> list[DeliveryResult]:
+        return self.notifier.flush_queued(target_id=target_id, limit=limit)
 
     def send_session_message(self, session_id: str, text: str) -> DeliveryResult:
         session = self._parse_session_id(session_id)
@@ -51,3 +69,4 @@ class BridgeService:
             raise ValueError("session id must use platform:conversation:sender")
         platform, conversation_id, sender_id = parts
         return SessionRef(session_id=session_id, platform=platform, conversation_id=conversation_id, sender_id=sender_id)
+
