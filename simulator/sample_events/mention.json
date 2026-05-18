@@ -1,0 +1,8 @@
+{
+  "MsgId": "demo-mention-001",
+  "MsgType": "text",
+  "FromUserName": "wechat-user-002",
+  "ToUserName": "bridge-account",
+  "CreateTime": 1710000002,
+  "Content": "@Hermes 请检查一下服务状态"
+}

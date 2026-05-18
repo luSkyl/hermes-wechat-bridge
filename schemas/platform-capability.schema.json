@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlatformCapability",
+  "type": "object",
+  "required": ["platform", "supports_text", "supports_images", "supports_files", "supports_threads"],
+  "properties": {
+    "platform": { "type": "string", "const": "wechat" },
+    "supports_text": { "type": "boolean" },
+    "supports_images": { "type": "boolean" },
+    "supports_files": { "type": "boolean" },
+    "supports_threads": { "type": "boolean" },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

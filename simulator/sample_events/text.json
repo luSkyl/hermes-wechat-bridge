@@ -1,0 +1,8 @@
+{
+  "MsgId": "demo-text-001",
+  "MsgType": "text",
+  "FromUserName": "wechat-user-001",
+  "ToUserName": "bridge-account",
+  "CreateTime": 1710000000,
+  "Content": "你好 Hermes，请帮我总结今天的任务。"
+}

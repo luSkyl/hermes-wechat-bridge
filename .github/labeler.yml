@@ -1,0 +1,23 @@
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docs/**"
+          - "README.md"
+          - "*.md"
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "tests/**"
+          - "simulator/sample_events/**"
+wechat:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "bridge/wechat/**"
+runtime:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "bridge/runtime/**"
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"

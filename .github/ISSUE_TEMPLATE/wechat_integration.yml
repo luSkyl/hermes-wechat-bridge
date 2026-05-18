@@ -1,0 +1,31 @@
+name: WeChat integration help
+description: Ask for help with a sanitized WeChat bridge setup
+title: "wechat: "
+labels: ["wechat", "support", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste real tokens, app secrets, private user IDs, or message contents.
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: OS, Python version, bridge version, Hermes mode, dry-run or real delivery.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      render: json
+  - type: textarea
+    id: event
+    attributes:
+      label: Sanitized event or simulator fixture
+      render: json
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true

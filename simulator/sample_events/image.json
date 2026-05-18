@@ -1,0 +1,9 @@
+{
+  "MsgId": "demo-image-001",
+  "MsgType": "image",
+  "FromUserName": "wechat-user-001",
+  "ToUserName": "bridge-account",
+  "CreateTime": 1710000001,
+  "PicUrl": "https://example.invalid/image.jpg",
+  "MediaId": "media-image-001"
+}

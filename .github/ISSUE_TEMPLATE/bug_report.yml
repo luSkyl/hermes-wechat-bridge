@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible bridge issue
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Do not include real tokens, private chat content, or production logs.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use simulator fixtures when possible.
+      placeholder: |
+        1. Run ...
+        2. Send ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste `doctor` output or sanitized simulator output.
+      render: json
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - WeChat callback
+        - Hermes client
+        - Delivery / retry / dedupe
+        - Service API / Web UI integration
+        - Docs / examples
+        - Other

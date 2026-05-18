@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+title: Hermes WeChat Bridge
+message: If this project helps your work, please cite the repository.
+type: software
+authors:
+  - name: Hermes WeChat Bridge contributors
+version: 0.1.0
+license: MIT

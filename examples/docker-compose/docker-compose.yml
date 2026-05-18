@@ -1,0 +1,9 @@
+services:
+  bridge:
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ../..:/app
+    command: sh -c "pip install -e . && python -m bridge.cli simulate --config examples/docker-compose/config.yaml --event simulator/sample_events/text.json"
+    environment:
+      PYTHONUNBUFFERED: "1"

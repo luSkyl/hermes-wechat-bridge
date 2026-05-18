@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MessageEvent",
+  "type": "object",
+  "required": ["event_id", "platform", "conversation_id", "sender_id", "kind", "text"],
+  "properties": {
+    "event_id": { "type": "string", "minLength": 1 },
+    "platform": { "type": "string", "const": "wechat" },
+    "conversation_id": { "type": "string", "minLength": 1 },
+    "sender_id": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "enum": ["text", "image", "file", "command", "unknown"] },
+    "text": { "type": "string" },
+    "timestamp": { "type": ["integer", "null"] },
+    "reply_to": { "type": ["string", "null"] },
+    "attachments": { "type": "array" },
+    "raw": { "type": "object" }
+  },
+  "additionalProperties": true
+}

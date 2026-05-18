@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DeliveryResult",
+  "type": "object",
+  "required": ["ok", "attempts"],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "delivery_id": { "type": ["string", "null"] },
+    "error": { "type": ["string", "null"] },
+    "attempts": { "type": "integer", "minimum": 1 },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": true
+}

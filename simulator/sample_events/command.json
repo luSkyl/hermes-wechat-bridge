@@ -1,0 +1,8 @@
+{
+  "MsgId": "demo-command-001",
+  "MsgType": "text",
+  "FromUserName": "wechat-user-003",
+  "ToUserName": "bridge-account",
+  "CreateTime": 1710000003,
+  "Content": "/status"
+}
