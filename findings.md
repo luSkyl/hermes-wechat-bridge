@@ -22,3 +22,9 @@
 
 ## Weixin Delivery Governor (2026-05-18 17:50:16 +08:00)
 - The bridge now includes the reusable delivery governor required for open-source completeness: quota learning, circuit breaker, priority queue, TTL expiry, and friendly-card status text.
+
+## Native Integration Kit module boundary
+- Added patchless shims under bridge/integrations/hermes_native rather than copying a Hermes fork.
+- Installer writes only .hermes-wechat-bridge/shims and integration.json under the provided Hermes home.
+- Verifier loads config, imports shims, and checks friendly/governed delivery status without sending WeChat messages.
+

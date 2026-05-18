@@ -1,4 +1,4 @@
-"""Minimal WeChat callback server for local and small deployments."""
+﻿"""Minimal WeChat callback server for local and small deployments."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from bridge.protocol import (
 )
 from bridge.runtime.config import BridgeConfig, load_config
 from bridge.runtime.diagnostics import run_diagnostics
+from bridge.runtime.notifier import BridgeNotifier
 from bridge.runtime.router import GatewayRouter
 from bridge.wechat import WeChatAdapter, WeChatSender
 from bridge.wechat.verifier import verify_signature
@@ -34,6 +35,7 @@ def serve(config_path: str, host: str = "127.0.0.1", port: int = 8787) -> None:
 def _build_handler(config: BridgeConfig) -> type[BaseHTTPRequestHandler]:
     adapter = WeChatAdapter(config.wechat)
     sender = WeChatSender(config.wechat)
+    notifier = BridgeNotifier(sender)
     router = GatewayRouter(config=config, hermes=HermesClient(config.hermes), sender=sender)
 
     class WeChatCallbackHandler(BaseHTTPRequestHandler):
@@ -49,6 +51,11 @@ def _build_handler(config: BridgeConfig) -> type[BaseHTTPRequestHandler]:
                 if not self._authorize_service_api():
                     return
                 self._write_json(200, _status_payload(config))
+                return
+            if parsed_url.path == "/delivery/status":
+                if not self._authorize_service_api():
+                    return
+                self._write_json(200, notifier.status())
                 return
 
             query = parse_qs(parsed_url.query)
@@ -70,6 +77,18 @@ def _build_handler(config: BridgeConfig) -> type[BaseHTTPRequestHandler]:
                     payload = self._read_json_body()
                     result = router.handle_event(adapter.normalize(payload))
                     self._write_json(200, result.to_dict())
+                    return
+                if parsed_url.path == "/notify":
+                    if not self._authorize_service_api():
+                        return
+                    result = _send_notification(notifier, self._read_json_body())
+                    self._write_json(200 if result.ok else 502, result.to_dict())
+                    return
+                if parsed_url.path == "/flush":
+                    if not self._authorize_service_api():
+                        return
+                    result = _flush_notifications(notifier, self._read_json_body())
+                    self._write_json(200 if result["ok"] else 502, result)
                     return
                 if parsed_url.path.startswith("/sessions/") and parsed_url.path.endswith("/message"):
                     if not self._authorize_service_api():
@@ -102,7 +121,7 @@ def _build_handler(config: BridgeConfig) -> type[BaseHTTPRequestHandler]:
                     )
                     self._write(200, reply_xml, content_type="application/xml")
                     return
-                self._write(200, json.dumps(result.to_dict(), ensure_ascii=False), content_type="application/json")
+                self._write_json(200, result.to_dict())
             except VerificationError:
                 self._write(403, "invalid signature", content_type="text/plain")
             except Exception as error:  # noqa: BLE001 - callback server returns safe error
@@ -175,10 +194,39 @@ def _status_payload(config: BridgeConfig) -> dict[str, object]:
         "contracts": {
             "health": "/health",
             "status": "/status",
+            "delivery_status": "/delivery/status",
             "simulate": "/simulate",
+            "notify": "/notify",
+            "flush": "/flush",
             "session_message": "/sessions/{id}/message",
         },
     }
+
+
+def _send_notification(notifier: BridgeNotifier, payload: dict[str, object]):
+    target_id = str(payload.get("target_id") or payload.get("target") or "").strip()
+    text = str(payload.get("text") or "").strip()
+    if not target_id:
+        raise ValueError("target_id is required")
+    if not text:
+        raise ValueError("text is required")
+    return notifier.notify_text(
+        target_id=target_id,
+        text=text,
+        title=str(payload.get("title") or "通知已接收"),
+        priority=str(payload.get("priority") or "normal"),
+        source=str(payload.get("source") or "service-api"),
+    )
+
+
+def _flush_notifications(notifier: BridgeNotifier, payload: dict[str, object]) -> dict[str, object]:
+    target_id = str(payload.get("target_id") or payload.get("target") or "").strip()
+    if not target_id:
+        raise ValueError("target_id is required")
+    limit_value = payload.get("limit")
+    limit = int(limit_value) if limit_value is not None else None
+    results = notifier.flush_queued(target_id=target_id, limit=limit)
+    return {"ok": all(item.ok for item in results), "count": len(results), "results": [item.to_dict() for item in results]}
 
 
 def _send_session_message(

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -12,7 +12,7 @@ from bridge.runtime.config import load_config
 from bridge.server import _build_handler, serve
 
 
-def test_http_health_status_simulate_and_session_message_contracts() -> None:
+def test_http_health_status_simulate_and_notification_contracts() -> None:
     config = load_config("examples/minimal/config.yaml")
     server = ThreadingHTTPServer(("127.0.0.1", 0), _build_handler(config))
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -21,6 +21,7 @@ def test_http_health_status_simulate_and_session_message_contracts() -> None:
     try:
         health = _request_json(f"{base_url}/health")
         status = _request_json(f"{base_url}/status")
+        delivery_status = _request_json(f"{base_url}/delivery/status")
         simulate = _request_json(
             f"{base_url}/simulate",
             {
@@ -31,11 +32,20 @@ def test_http_health_status_simulate_and_session_message_contracts() -> None:
                 "Content": "hello",
             },
         )
+        notification = _request_json(f"{base_url}/notify", {"target_id": "wxid_home", "text": "hello"})
+        flush = _request_json(f"{base_url}/flush", {"target_id": "wxid_home", "limit": 3})
         session_delivery = _request_json(f"{base_url}/sessions/wechat:bridge:user-1/message", {"text": "manual"})
 
         assert health["ok"] is True
         assert status["service"] == "hermes-wechat-bridge"
+        assert status["contracts"]["delivery_status"] == "/delivery/status"
+        assert status["contracts"]["notify"] == "/notify"
+        assert status["contracts"]["flush"] == "/flush"
+        assert delivery_status["enabled"] is True
         assert simulate["status"] == "delivered"
+        assert notification["ok"] is True
+        assert "【状态】" in notification["metadata"]["request"]["text"]
+        assert flush["ok"] is True
         assert session_delivery["ok"] is True
     finally:
         server.shutdown()

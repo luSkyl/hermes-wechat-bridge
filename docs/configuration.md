@@ -1,4 +1,4 @@
-﻿# Configuration
+# Configuration
 
 Configuration is a small YAML-like file. The built-in parser supports simple nested mappings used by the examples. If `PyYAML` is installed, full YAML parsing is used.
 
@@ -53,9 +53,13 @@ Use `BridgeNotifier` for direct `send_message_tool`-style notifications, `CronDe
 
 Run `python -m bridge.cli notify --config <config> --target <chat-id> --text <message>` to send or queue a governed friendly-card notification, and `python -m bridge.cli flush --config <config> --target <chat-id>` to release queued cards in a later window.
 
+For patchless Hermes runtime wiring, use the Hermes Native Integration Kit: `python -m bridge.cli install-hermes-native --hermes-home <path> --config <config> --target <chat-id>`.
+
 ## Production Notes
 
 - Set `wechat.dry_run` to `false` only after webhook verification works.
 - Use HTTPS for callbacks.
 - Keep Hermes endpoint private when possible.
 - Set `runtime.service_api_token` before binding the callback server to a non-loopback host.
+
+

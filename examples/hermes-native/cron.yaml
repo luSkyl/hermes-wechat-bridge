@@ -1,0 +1,13 @@
+﻿# Example Cron notification mapping for Hermes Native Integration Kit.
+# Your scheduler owns timing; the bridge owns friendly cards + Weixin governance.
+
+default_target: wxid_home
+jobs:
+  - name: morning-report
+    notify_on_failure: true
+    notify_on_recovery: true
+    priority: high
+  - name: upstream-model-health
+    notify_on_failure: true
+    notify_on_recovery: true
+    priority: critical

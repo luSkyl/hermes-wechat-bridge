@@ -1,4 +1,4 @@
-# Service API
+﻿# Service API
 
 The service API lets Hermes Web UI and operators observe or test the bridge without taking ownership of WeChat runtime logic.
 
@@ -27,6 +27,38 @@ Returns diagnostics suitable for readiness checks.
 
 Returns safe runtime metadata. This endpoint must not expose tokens, private chat IDs, or message content.
 
+## `GET /delivery/status`
+
+Returns safe Weixin Delivery Governor state for local dashboards and Web UI panels. It exposes queue size, current circuit state, window capacity, remaining attempts, and next available time without exposing raw chat IDs or secrets.
+
+## `POST /notify`
+
+Sends or queues an operational notification. Body:
+
+```json
+{
+  "target_id": "wxid_home",
+  "title": "上游模型已恢复",
+  "text": "模型恢复后需要重新执行定时任务。",
+  "priority": "high"
+}
+```
+
+The service wraps `text` in the friendly-card template before it reaches WeChat and admits the attempt through the governor.
+
+## `POST /flush`
+
+Attempts to flush queued notifications for a target. Body:
+
+```json
+{
+  "target_id": "wxid_home",
+  "limit": 3
+}
+```
+
+Flush volume is still governed by the current send window, so releasing queued cards cannot bypass the iLink protection circuit.
+
 ## `POST /simulate`
 
 Replays a WeChat-like JSON event through the bridge. This is intended for diagnostics, local development, and Web UI smoke checks.
@@ -37,4 +69,4 @@ Sends a controlled direct message through the bridge delivery layer. The session
 
 ## Web UI Rule
 
-Hermes Web UI may consume these endpoints for observation and diagnostics. It must not reimplement callback handling, dedupe, retry, session mapping, or delivery.
+Hermes Web UI may consume these endpoints for observation and diagnostics. It must not reimplement callback handling, dedupe, retry, session mapping, friendly-card rendering, or delivery governance.

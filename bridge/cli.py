@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from bridge.hermes import HermesClient
+from bridge.integrations.hermes_native import install_hermes_native, verify_hermes_native
 from bridge.runtime.config import load_config
 from bridge.runtime.diagnostics import run_diagnostics
 from bridge.runtime.router import GatewayRouter
@@ -44,6 +45,18 @@ def main(argv: list[str] | None = None) -> int:
     flush_parser.add_argument("--target", required=True, help="WeChat recipient / conversation id")
     flush_parser.add_argument("--limit", type=int, default=None, help="maximum queued notifications to send")
 
+    queue_parser = subparsers.add_parser("queue-status", help="show safe Weixin delivery-governor queue status")
+    queue_parser.add_argument("--config", required=True, help="path to config YAML")
+
+    install_parser = subparsers.add_parser("install-hermes-native", help="install patchless Hermes native integration shims")
+    install_parser.add_argument("--hermes-home", required=True, help="Hermes home/workspace directory to receive shim manifest")
+    install_parser.add_argument("--config", required=True, help="bridge config YAML used by the generated shims")
+    install_parser.add_argument("--target", required=True, help="default WeChat recipient / conversation id")
+    install_parser.add_argument("--force", action="store_true", help="overwrite generated shim files if they differ")
+
+    verify_parser = subparsers.add_parser("verify-hermes-native", help="verify a patchless Hermes native integration install")
+    verify_parser.add_argument("--hermes-home", required=True, help="Hermes home/workspace directory containing integration.json")
+
     args = parser.parse_args(argv)
     if args.command == "doctor":
         return _doctor(args.config)
@@ -56,6 +69,12 @@ def main(argv: list[str] | None = None) -> int:
         return _notify(args.config, args.target, args.text, args.title, args.priority)
     if args.command == "flush":
         return _flush(args.config, args.target, args.limit)
+    if args.command == "queue-status":
+        return _queue_status(args.config)
+    if args.command == "install-hermes-native":
+        return _install_hermes_native(args.hermes_home, args.config, args.target, args.force)
+    if args.command == "verify-hermes-native":
+        return _verify_hermes_native(args.hermes_home)
     parser.error("unknown command")
     return 2
 
@@ -91,6 +110,24 @@ def _flush(config_path: str, target: str, limit: int | None) -> int:
     payload = {"ok": all(item.ok for item in results), "count": len(results), "results": [item.to_dict() for item in results]}
     _print_json(payload)
     return 0 if payload["ok"] else 1
+
+
+def _queue_status(config_path: str) -> int:
+    service = BridgeService(load_config(config_path))
+    _print_json(service.delivery_status())
+    return 0
+
+
+def _install_hermes_native(hermes_home: str, config_path: str, target: str, force: bool) -> int:
+    report = install_hermes_native(hermes_home=hermes_home, config_path=config_path, target_id=target, force=force)
+    _print_json(report.to_dict())
+    return 0 if report.ok else 1
+
+
+def _verify_hermes_native(hermes_home: str) -> int:
+    report = verify_hermes_native(hermes_home=hermes_home)
+    _print_json(report.to_dict())
+    return 0 if report.ok else 1
 
 
 def _print_json(payload: dict[str, object]) -> None:

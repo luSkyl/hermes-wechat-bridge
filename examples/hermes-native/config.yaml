@@ -1,0 +1,29 @@
+﻿bridge:
+  name: hermes-wechat-bridge
+  environment: hermes-native-demo
+
+wechat:
+  token: dev-token
+  dry_run: true
+  max_reply_chars: 1800
+  governor_enabled: true
+  governor_state_dir: ./.bridge-state/weixin-governor
+  governor_window_seconds: 60
+  governor_initial_capacity: 3
+  governor_min_capacity: 1
+  governor_max_capacity: 20
+  governor_max_flush_per_window: 3
+  governor_queue_max_size: 500
+  governor_base_backoff_seconds: 300
+  governor_max_backoff_seconds: 3600
+
+hermes:
+  mode: mock
+  endpoint: http://127.0.0.1:8765/messages
+
+runtime:
+  dedupe_ttl_seconds: 300
+  retry_attempts: 2
+  retry_backoff_seconds: 0.1
+  request_timeout_seconds: 20
+  service_api_token: optional-local-admin-token

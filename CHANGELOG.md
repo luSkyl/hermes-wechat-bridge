@@ -1,9 +1,21 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to Hermes WeChat Bridge will be documented in this file.
 
 The format follows the spirit of Keep a Changelog, and this project uses semantic versioning once public releases begin.
 
+## [0.1.0-alpha.4] - 2026-05-18
+
+### Added
+
+- Hermes Native Integration Kit with patchless install/verify commands and generated shims for send-message, Cron, and Guardian notification paths.
+- Service API endpoints for delivery status, governed notification sends, and queued notification flushes.
+- `examples/hermes-native` clean-clone demo configuration, scripts, and smoke example.
+- Contract tests for install/verify, generated wrappers, CLI, HTTP notification endpoints, and friendly-card shims.
+
+### Changed
+
+- Prepared the Python package version as `0.1.0a4` for the complete integration-kit alpha artifact.
 ## [0.1.0-alpha.3] - 2026-05-18
 
 ### Added
@@ -51,3 +63,4 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 ### Planned
 
 - Stable package release after alpha validation and PyPI trusted publishing setup.
+

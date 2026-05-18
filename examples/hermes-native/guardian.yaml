@@ -1,0 +1,9 @@
+﻿# Example Guardian notification mapping for Hermes Native Integration Kit.
+# Guardian can be any watchdog process; this file documents the expected names.
+
+default_target: wxid_home
+incidents:
+  - name: upstream-model
+    priority: critical
+  - name: cron-scheduler
+    priority: high

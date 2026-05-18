@@ -1,4 +1,4 @@
-﻿# Hermes WeChat Bridge
+# Hermes WeChat Bridge
 
 [![CI](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml)
@@ -50,6 +50,8 @@ python -m bridge.cli simulate --config examples/minimal/config.yaml --event simu
 python -m bridge.cli serve --config examples/minimal/config.yaml --host 127.0.0.1 --port 8787
 python -m bridge.cli notify --config examples/minimal/config.yaml --target wxid_home --title "上游模型已恢复" --text "模型恢复后需要重新执行定时任务。" --priority high
 python -m bridge.cli flush --config examples/minimal/config.yaml --target wxid_home --limit 3
+python -m bridge.cli install-hermes-native --hermes-home ./.demo-hermes-home --config examples/hermes-native/config.yaml --target wxid_home --force
+python -m bridge.cli verify-hermes-native --hermes-home ./.demo-hermes-home
 ```
 
 Expected simulator output includes a delivered dry-run reply from the bridge runtime:
@@ -121,6 +123,7 @@ When binding to a non-loopback host, `runtime.service_api_token` is required so 
 - [Gateway Flow](docs/gateway-flow.md)
 - [Message Lifecycle](docs/message-lifecycle.md)
 - [Runtime Notifications](docs/runtime-notifications.md)
+- [Hermes Native Integration](docs/hermes-native-integration.md)
 - [Failure Modes](docs/failure-modes.md)
 - [Sync Strategy](docs/sync-strategy.md)
 - [Compatibility Matrix](docs/compatibility-matrix.md)
@@ -150,3 +153,5 @@ Use the alpha to validate the architecture, local simulator, and upgrade boundar
 ## License
 
 MIT
+
+
