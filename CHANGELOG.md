@@ -4,7 +4,7 @@ All notable changes to Hermes WeChat Bridge will be documented in this file.
 
 The format follows the spirit of Keep a Changelog, and this project uses semantic versioning once public releases begin.
 
-## [0.1.0-alpha.2] - Unreleased
+## [0.1.0-alpha.2] - 2026-05-18
 
 ### Added
 

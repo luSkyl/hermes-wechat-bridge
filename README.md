@@ -130,7 +130,7 @@ When binding to a non-loopback host, `runtime.service_api_token` is required so 
 
 ## Project Status
 
-This project is in alpha. The latest published prerelease is `v0.1.0-alpha.1`; current `main` prepares the next alpha package version `0.1.0a2`. The public contract is intentionally small: Hermes client contract, WeChat callback normalization, bridge service API, simulator fixtures, and compatibility tests.
+This project is in alpha. The latest published prerelease is `v0.1.0-alpha.2`, with Python package version `0.1.0a2`. The public contract is intentionally small: Hermes client contract, WeChat callback normalization, bridge service API, simulator fixtures, and compatibility tests.
 
 Use the alpha to validate the architecture, local simulator, and upgrade boundary. Production adopters should review [Security Model](docs/security-model.md), [Production Checklist](docs/production-checklist.md), and [Release Process](RELEASE.md) before exposing callbacks publicly.
 
