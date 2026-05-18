@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from bridge.hermes import HermesClient
@@ -45,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
 def _doctor(config_path: str) -> int:
     config = load_config(config_path)
     result = run_diagnostics(config)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    _print_json(result.to_dict())
     return 0 if result.ok else 1
 
 
@@ -56,8 +57,22 @@ def _simulate(config_path: str, event_path: str) -> int:
     event = adapter.normalize(payload)
     router = GatewayRouter(config=config, hermes=HermesClient(config.hermes), sender=WeChatSender(config.wechat))
     result = router.handle_event(event)
-    print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    _print_json(result.to_dict())
     return 0 if result.status in {"delivered", "duplicate"} else 1
+
+
+def _print_json(payload: dict[str, object]) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    try:
+        sys.stdout.write(f"{text}\n")
+    except UnicodeEncodeError:
+        output = f"{text}\n".encode()
+        stdout_buffer = getattr(sys.stdout, "buffer", None)
+        if stdout_buffer is None:
+            sys.stdout.write(output.decode("ascii", errors="backslashreplace"))
+            return
+        stdout_buffer.write(output)
+        stdout_buffer.flush()
 
 
 if __name__ == "__main__":

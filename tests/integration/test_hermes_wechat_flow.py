@@ -1,6 +1,8 @@
+import io
+import sys
 from pathlib import Path
 
-from bridge.cli import main
+from bridge.cli import _print_json, main
 from bridge.hermes import HermesClient
 from bridge.runtime.config import load_config
 from bridge.runtime.router import GatewayRouter
@@ -67,3 +69,14 @@ def test_router_deduplicates_replayed_event() -> None:
 def test_cli_doctor_and_simulate_pass() -> None:
     assert main(["doctor", "--config", str(CONFIG)]) == 0
     assert main(["simulate", "--config", str(CONFIG), "--event", str(TEXT_EVENT)]) == 0
+
+
+def test_cli_json_output_survives_non_utf8_stdout(monkeypatch) -> None:
+    raw_output = io.BytesIO()
+    cp1252_stdout = io.TextIOWrapper(raw_output, encoding="cp1252", write_through=True)
+    monkeypatch.setattr(sys, "stdout", cp1252_stdout)
+
+    _print_json({"reply_text": "你好 Hermes"})
+    cp1252_stdout.flush()
+
+    assert "你好 Hermes" in raw_output.getvalue().decode("utf-8")
