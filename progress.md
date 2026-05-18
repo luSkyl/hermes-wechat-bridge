@@ -19,6 +19,8 @@
 - Added open-source launch assets: code of conduct, governance, maintainers, support, roadmap, changelog, release process, issue forms, PR template, Dependabot, CI, CodeQL, dependency review, Scorecard, labeler, release workflow, and release-ready script.
 - Added packaging metadata, ruff lint config, release readiness checks, launch checklist, maintainer guide, and README badges/community links.
 - Verified lint, tests, compile, CLI smoke, release readiness, package build, and package metadata checks; cleaned generated artifacts.
+- SKILLS_TRACE: using-superpowers -> brainstorming -> planning-with-files -> backend-delivery -> governance-neat-check -> cc-skill-coding-standards -> security-review.
+- Upgraded public launch surface after first alpha: README positioning, release-note categories, PyPI trusted-publishing gated workflow, release process docs, and launch checklist status.
 
 ## Commands and Evidence
 
@@ -48,6 +50,8 @@
 | `python -m build` | pass | sdist and wheel built |
 | `python -m twine check dist/*` | pass | package metadata checks passed |
 | generated artifact cleanup | pass | removed `dist`, `build`, egg-info, `.pytest_cache`, `.ruff_cache`, `__pycache__` |
+| GitHub Actions after alpha release | pass | CI, CodeQL, Scorecard, and Release succeeded on `main`/`v0.1.0-alpha.1` |
+| Public release verification | pass | `v0.1.0-alpha.1` prerelease has wheel and sdist assets |
 
 ## Verification
 

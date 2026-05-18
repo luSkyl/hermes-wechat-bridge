@@ -36,6 +36,29 @@ jobs:
           files: dist/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
-      # Uncomment after configuring PyPI trusted publishing for this repository.
-      # - name: Publish to PyPI
-      #   uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    if: vars.PUBLISH_TO_PYPI == 'true' && !contains(github.ref_name, '-')
+    environment:
+      name: pypi
+      url: https://pypi.org/project/hermes-wechat-bridge/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - name: Build package
+        run: |
+          python -m pip install build
+          python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

@@ -21,3 +21,10 @@ ci:
   - changed-files:
       - any-glob-to-any-file:
           - ".github/**"
+release:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "CHANGELOG.md"
+          - "RELEASE.md"
+          - ".github/release.yml"
+          - ".github/workflows/release.yml"
