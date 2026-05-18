@@ -6,6 +6,12 @@ wechat:
   token: dev-token
   dry_run: true
   max_reply_chars: 1800
+  governor_enabled: true
+  governor_window_seconds: 60
+  governor_initial_capacity: 3
+  governor_max_flush_per_window: 3
+  governor_base_backoff_seconds: 300
+  governor_max_backoff_seconds: 3600
 
 hermes:
   mode: mock

@@ -21,6 +21,7 @@
 - Verified lint, tests, compile, CLI smoke, release readiness, package build, and package metadata checks; cleaned generated artifacts.
 - SKILLS_TRACE: using-superpowers -> brainstorming -> planning-with-files -> backend-delivery -> governance-neat-check -> cc-skill-coding-standards -> security-review.
 - Upgraded public launch surface after first alpha: README positioning, release-note categories, PyPI trusted-publishing gated workflow, release process docs, and launch checklist status.
+- Added Weixin Delivery Governor as the outbound send-attempt budget, queue, breaker, and friendly-card layer for alpha.3.
 
 ## Commands and Evidence
 
@@ -56,3 +57,5 @@
 ## Verification
 
 - Complete: pytest, CLI doctor, CLI simulator, secret scan, cache cleanup.
+
+[2026-05-18 17:50:16 +08:00] Added Weixin Delivery Governor, config knobs, sender integration, docs, and contract tests.

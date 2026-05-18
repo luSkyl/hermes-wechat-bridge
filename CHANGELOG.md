@@ -4,6 +4,19 @@ All notable changes to Hermes WeChat Bridge will be documented in this file.
 
 The format follows the spirit of Keep a Changelog, and this project uses semantic versioning once public releases begin.
 
+## [0.1.0-alpha.3] - 2026-05-18
+
+### Added
+
+- File-backed Weixin Delivery Governor for outbound send-attempt budgeting, queueing, priority flush, and circuit breaking after rate-limit signals.
+- Governor configuration keys in example configs and runtime config parsing.
+- Contract tests for quota windows, rate-limit breaker behavior, half-open canary attempts, priority queueing, stale expiration, and friendly user-visible cards.
+
+### Changed
+
+- `WeChatSender` now routes outbound delivery through the governor before dry-run or real sender behavior.
+- Prepared the Python package version as `0.1.0a3` for the next alpha artifact.
+
 ## [0.1.0-alpha.2] - 2026-05-18
 
 ### Added

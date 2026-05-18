@@ -30,7 +30,7 @@ Most WeChat integrations become hard to maintain because channel-specific code l
 
 - **Stable bridge contract**: normalized message protocol between WeChat and Hermes.
 - **Safe local development**: simulator fixtures run without real WeChat credentials.
-- **Production guardrails**: signature verification, service API token checks, retry, dedupe, and health/status endpoints.
+- **Production guardrails**: signature verification, service API token checks, retry, dedupe, delivery governor, and health/status endpoints.
 - **Upgrade-friendly boundary**: compatibility tests and docs make Hermes/Hermes Web UI upgrades contract-driven.
 - **Open-source ready workflow**: CI, CodeQL, Scorecard, Dependabot, release assets, governance, and security policy.
 
@@ -75,7 +75,7 @@ flowchart LR
   H --> HA["Hermes Agent"]
   HA --> H
   H --> R
-  R --> D["Delivery + Dedupe + Retry"]
+  R --> D["Delivery + Dedupe + Retry + Governor"]
   D --> A
   A --> U
 ```
@@ -98,6 +98,7 @@ When binding to a non-loopback host, `runtime.service_api_token` is required so 
 - Start with `examples/minimal/config.yaml`, then replace placeholders with your WeChat and Hermes settings.
 - Keep real tokens in environment-specific secret stores; do not commit production configs.
 - Put the bridge behind HTTPS before pointing WeChat callbacks at it.
+- Keep `wechat.governor_enabled` on in production so failed attempts, not only visible messages, count toward the learned send budget.
 - Run the compatibility tests after Hermes or Hermes Web UI upgrades.
 - Treat bridge release tags as the deployment boundary for WeChat runtime behavior.
 
@@ -130,7 +131,7 @@ When binding to a non-loopback host, `runtime.service_api_token` is required so 
 
 ## Project Status
 
-This project is in alpha. The latest published prerelease is `v0.1.0-alpha.2`, with Python package version `0.1.0a2`. The public contract is intentionally small: Hermes client contract, WeChat callback normalization, bridge service API, simulator fixtures, and compatibility tests.
+This project is in alpha. The latest published prerelease is `v0.1.0-alpha.3`, with Python package version `0.1.0a3`. The public contract is intentionally small: Hermes client contract, WeChat callback normalization, bridge service API, simulator fixtures, and compatibility tests.
 
 Use the alpha to validate the architecture, local simulator, and upgrade boundary. Production adopters should review [Security Model](docs/security-model.md), [Production Checklist](docs/production-checklist.md), and [Release Process](RELEASE.md) before exposing callbacks publicly.
 

@@ -16,6 +16,20 @@ class WeChatConfig:
     app_id: str | None = None
     app_secret: str | None = None
     max_reply_chars: int = 1800
+    governor_enabled: bool = True
+    governor_state_dir: str | None = None
+    governor_window_seconds: int = 60
+    governor_initial_capacity: int = 3
+    governor_min_capacity: int = 1
+    governor_max_capacity: int = 20
+    governor_max_flush_per_window: int = 3
+    governor_queue_max_size: int = 500
+    governor_base_backoff_seconds: int = 300
+    governor_max_backoff_seconds: int = 3600
+    governor_low_priority_ttl_seconds: int = 1800
+    governor_default_ttl_seconds: int = 7200
+    governor_high_priority_ttl_seconds: int = 21600
+    governor_critical_ttl_seconds: int = 86400
 
 
 @dataclass(frozen=True)
@@ -77,6 +91,20 @@ def parse_config(data: dict[str, Any]) -> BridgeConfig:
             app_id=_optional_str(wechat_data.get("app_id")),
             app_secret=_optional_str(wechat_data.get("app_secret")),
             max_reply_chars=_to_int(wechat_data.get("max_reply_chars", 1800), 1800),
+            governor_enabled=_to_bool(wechat_data.get("governor_enabled", True)),
+            governor_state_dir=_optional_str(wechat_data.get("governor_state_dir")),
+            governor_window_seconds=_to_int(wechat_data.get("governor_window_seconds", 60), 60),
+            governor_initial_capacity=_to_int(wechat_data.get("governor_initial_capacity", 3), 3),
+            governor_min_capacity=_to_int(wechat_data.get("governor_min_capacity", 1), 1),
+            governor_max_capacity=_to_int(wechat_data.get("governor_max_capacity", 20), 20),
+            governor_max_flush_per_window=_to_int(wechat_data.get("governor_max_flush_per_window", 3), 3),
+            governor_queue_max_size=_to_int(wechat_data.get("governor_queue_max_size", 500), 500),
+            governor_base_backoff_seconds=_to_int(wechat_data.get("governor_base_backoff_seconds", 300), 300),
+            governor_max_backoff_seconds=_to_int(wechat_data.get("governor_max_backoff_seconds", 3600), 3600),
+            governor_low_priority_ttl_seconds=_to_int(wechat_data.get("governor_low_priority_ttl_seconds", 1800), 1800),
+            governor_default_ttl_seconds=_to_int(wechat_data.get("governor_default_ttl_seconds", 7200), 7200),
+            governor_high_priority_ttl_seconds=_to_int(wechat_data.get("governor_high_priority_ttl_seconds", 21600), 21600),
+            governor_critical_ttl_seconds=_to_int(wechat_data.get("governor_critical_ttl_seconds", 86400), 86400),
         ),
         hermes=HermesConfig(
             mode=hermes_mode,

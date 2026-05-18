@@ -78,3 +78,7 @@ Create a clean open-source MVP that lets users follow one recommended path to bu
 
 - SKILLS_TRACE: using-superpowers -> brainstorming -> planning-with-files -> backend-delivery -> cc-skill-coding-standards -> cc-skill-backend-patterns -> security-review planned for auth/input/sensitive-data surfaces.
 - SKILLS_TRACE: repeatable-task-bootstrap -> planning-with-files -> backend-delivery for decoupling execution; RCCP unavailable, fallback evidence recorded in `task_plan.md` and `progress.md`.
+
+## Weixin Delivery Governor (2026-05-18 17:50:16 +08:00)
+- Implement reusable governor: completed.
+- Integrate bridge sender/config/docs/tests: completed.

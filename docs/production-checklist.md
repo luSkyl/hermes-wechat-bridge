@@ -8,6 +8,7 @@
 - [ ] WeChat signature verification is enabled.
 - [ ] Hermes endpoint is reachable and protected.
 - [ ] Dedupe TTL and retry settings are tuned.
+- [ ] Delivery-governor state directory is outside git, access-restricted, backed up if needed, and retention-limited.
 - [ ] Logs are redacted and retention-limited.
 - [ ] Friendly fallback messages are reviewed.
 

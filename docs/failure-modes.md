@@ -9,7 +9,9 @@ flowchart TD
   C -- "No" --> D{"Hermes Available?"}
   D -- "No" --> E["Send Friendly Failure Message"]
   D -- "Yes" --> F["Run Hermes Session"]
-  F --> G{"Delivery OK?"}
+  F --> Q{"Governor Allows?"}
+  Q -- "No" --> L["Queue + Friendly Local Status"]
+  Q -- "Yes" --> G{"Delivery OK?"}
   G -- "Yes" --> H["Record Delivery Success"]
   G -- "No" --> I["Retry With Backoff"]
   I --> J{"Retry Exhausted?"}
@@ -23,7 +25,9 @@ flowchart TD
 - Duplicate event: acknowledge without a second Hermes call.
 - Hermes timeout: tell the user the agent is busy and suggest retrying later.
 - Delivery failure: retry with backoff and record diagnostic context.
+- Weixin rate limit: count the failed attempt, open the governor, queue remaining notifications, and wait for the next window.
 - Overlong response: split or summarize before sending.
+- Governor queued: do not send a WeChat message explaining the limit; expose a friendly card through local/Web UI status and merge queued notifications later.
 
 ## Operator Signals
 

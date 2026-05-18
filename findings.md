@@ -19,3 +19,6 @@
 - No Web UI in v1.
 - No copying private configs, logs, tokens, channel IDs, or historical task evidence.
 - No full replacement for Hermes Agent.
+
+## Weixin Delivery Governor (2026-05-18 17:50:16 +08:00)
+- The bridge now includes the reusable delivery governor required for open-source completeness: quota learning, circuit breaker, priority queue, TTL expiry, and friendly-card status text.

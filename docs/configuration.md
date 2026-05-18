@@ -12,6 +12,10 @@ bridge:
 wechat:
   token: dev-token
   dry_run: true
+  governor_enabled: true
+  governor_window_seconds: 60
+  governor_initial_capacity: 3
+  governor_base_backoff_seconds: 300
 
 hermes:
   mode: mock
@@ -30,6 +34,18 @@ runtime:
 - Use `.env` or environment variables for real credentials.
 - Keep committed examples in dry-run or mock mode.
 - Do not commit real callback tokens, app secrets, chat IDs, or logs.
+
+## Weixin Delivery Governor
+
+`wechat.governor_enabled` should stay enabled for any production-like deployment. The governor protects iLink by counting every outbound send attempt, including failed attempts that never become visible in chat.
+
+- `governor_window_seconds`: size of the learned quota window.
+- `governor_initial_capacity`: safe starting budget per window before the bridge learns more.
+- `governor_base_backoff_seconds` / `governor_max_backoff_seconds`: protection window after iLink reports rate limiting.
+- `governor_max_flush_per_window`: maximum queued messages to release after a successful send.
+- `governor_state_dir`: optional file-backed state directory; omit it to use the bridge state directory.
+
+When the governor is open, user-visible content must be a friendly card or local/Web UI status. Do not send a WeChat message just to explain that WeChat is rate limited.
 
 ## Production Notes
 

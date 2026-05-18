@@ -17,6 +17,7 @@ sequenceDiagram
   Gateway->>Hermes: Send prompt
   Hermes-->>Gateway: Stream/final response
   Gateway->>Gateway: Format friendly reply
+  Gateway->>Delivery: Reserve governor quota
   Gateway->>Delivery: Send response
   Delivery->>WeChat: Deliver message
   WeChat-->>User: Show reply
@@ -29,8 +30,13 @@ sequenceDiagram
 3. `normalized`: payload became a `MessageEvent`.
 4. `routed`: the event was mapped to a Hermes session.
 5. `answered`: Hermes returned a response or a safe fallback was generated.
-6. `delivered`: outbound message was sent or dry-run emitted.
+6. `admitted`: the Weixin Delivery Governor reserved a send attempt or queued the message.
+7. `delivered`: outbound message was sent or dry-run emitted.
 
 ## Idempotency
 
 The bridge deduplicates by event ID. Replayed webhook events should be acknowledged without invoking Hermes again.
+
+## Delivery Governance
+
+The Weixin Delivery Governor sits below friendly reply formatting and above the actual sender. It learns a safe per-window send budget, counts failed attempts, opens a circuit after `ret=-2`/`errcode=-2`, and releases queued messages by priority in later windows. Low-priority queued notices expire first so stale background alerts do not crowd out fresh user-facing updates.

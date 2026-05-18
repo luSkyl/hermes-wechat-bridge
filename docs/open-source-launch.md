@@ -37,6 +37,8 @@ Use this checklist before making the repository public.
 ## Release Status
 
 - [x] `v0.1.0-alpha.1` prerelease created.
+- [x] `v0.1.0-alpha.2` prerelease created.
+- [x] `v0.1.0-alpha.3` prerelease created after delivery governor validation.
 - [x] GitHub release artifacts uploaded.
 - [x] Release notes generation configured in `.github/release.yml`.
 - [x] PyPI trusted-publishing workflow is present but gated until PyPI is configured.
