@@ -6,9 +6,16 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-19
+
 ### Added
 
 - Added Hermes Core distribution patches for persona-aware friendly gateway templates, cron/background friendly output, approval prompt copy, and local profile vault backups.
+
+### Changed
+
+- Updated the package version to `0.1.1`.
+- Locked the distribution manifest to tag `v0.1.1`.
 
 ## [0.1.0] - 2026-05-19
 

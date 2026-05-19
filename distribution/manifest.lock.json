@@ -1,14 +1,14 @@
 {
     "schema_version": 1,
     "name": "hermes-wechat-distribution",
-    "version": "0.1.0",
-    "generated_at": "2026-05-19T14:23:42.830740+08:00",
+    "version": "0.1.1",
+    "generated_at": "2026-05-19T20:52:00+08:00",
     "bridge": {
         "repo": "https://github.com/luSkyl/hermes-wechat-bridge.git",
         "package": "hermes-wechat-bridge",
-        "version": "0.1.0",
-        "recommended_tag": "v0.1.0",
-        "ref": "v0.1.0",
+        "version": "0.1.1",
+        "recommended_tag": "v0.1.1",
+        "ref": "v0.1.1",
         "distribution_source": "same-repository-release-tag"
     },
     "core": {
