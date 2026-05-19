@@ -12,6 +12,8 @@ bridge:
 wechat:
   token: dev-token
   dry_run: true
+  app_id: optional-official-account-app-id
+  app_secret: optional-official-account-app-secret
   governor_enabled: true
   governor_window_seconds: 60
   governor_initial_capacity: 3
@@ -23,10 +25,12 @@ hermes:
 
 runtime:
   dedupe_ttl_seconds: 300
+  dedupe_state_dir: ./.bridge-state/dedupe
   retry_attempts: 2
   retry_backoff_seconds: 0.1
   request_timeout_seconds: 20
   service_api_token: optional-local-admin-token
+  allow_unsigned_webhook: false
 ```
 
 ## Secret Handling
@@ -47,6 +51,10 @@ runtime:
 
 When the governor is open, user-visible content must be a friendly card or local/Web UI status. Do not send a WeChat message just to explain that WeChat is rate limited.
 
+## Official Account Delivery
+
+When `wechat.dry_run` is `false` and both `wechat.app_id` and `wechat.app_secret` are configured, `WeChatSender` uses the official custom-message text API by default. Keep dry-run enabled until the callback signature check, token acquisition, and a small manual delivery smoke test all pass.
+
 ## Runtime Notification Adapters
 
 Use `BridgeNotifier` for direct `send_message_tool`-style notifications, `CronDeliveryNotifier` for scheduled-task alerts, and `GuardianDeliveryNotifier` for watchdog incidents. These adapters always render friendly cards before calling `WeChatSender`, so raw stack traces, `ret=-2`, and transport errors are not sent to chat.
@@ -58,8 +66,8 @@ For patchless Hermes runtime wiring, use the Hermes Native Integration Kit: `pyt
 ## Production Notes
 
 - Set `wechat.dry_run` to `false` only after webhook verification works.
+- Keep `runtime.allow_unsigned_webhook` set to `false` in production. It is only for tightly controlled local callback experiments; `/simulate` remains the preferred unsigned test path.
+- Set `runtime.dedupe_state_dir` to a writable runtime directory when running multiple workers or when callback retries must survive process restarts.
 - Use HTTPS for callbacks.
 - Keep Hermes endpoint private when possible.
 - Set `runtime.service_api_token` before binding the callback server to a non-loopback host.
-
-

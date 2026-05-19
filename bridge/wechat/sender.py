@@ -9,6 +9,7 @@ from bridge.protocol import DeliveryRequest, DeliveryResult
 from bridge.runtime.config import WeChatConfig
 from bridge.runtime.friendly_card import delivery_deferred_card, delivery_failed_card, friendly_card
 from bridge.wechat.governor import WeixinDeliveryGovernor, WeixinDeliveryGovernorConfig, is_rate_limited_result
+from bridge.wechat.official import OfficialAccountTextTransport
 
 SendTransport = Callable[[DeliveryRequest], DeliveryResult]
 
@@ -18,7 +19,7 @@ class WeChatSender:
 
     def __init__(self, config: WeChatConfig, transport: SendTransport | None = None) -> None:
         self.config = config
-        self.transport = transport
+        self.transport = transport if transport is not None else self._build_default_transport(config)
         self.governor = WeixinDeliveryGovernor(
             WeixinDeliveryGovernorConfig(
                 enabled=config.governor_enabled,
@@ -37,6 +38,14 @@ class WeChatSender:
                 critical_ttl_seconds=config.governor_critical_ttl_seconds,
             )
         )
+
+    @staticmethod
+    def _build_default_transport(config: WeChatConfig) -> SendTransport | None:
+        if config.dry_run:
+            return None
+        if config.app_id and config.app_secret:
+            return OfficialAccountTextTransport(config)
+        return None
 
     def send(self, request: DeliveryRequest) -> DeliveryResult:
         decision = self.governor.admit_or_queue(
@@ -84,7 +93,10 @@ class WeChatSender:
                     "governed": True,
                 },
             )
-            results.append(self._attempt_transport(request, {"queued_delivery": queued.to_dict(), "flush": True}, attempts=queued.attempts))
+            result = self._attempt_transport(request, {"queued_delivery": queued.to_dict(), "flush": True}, attempts=queued.attempts)
+            if not result.ok and not result.metadata.get("queued"):
+                self.governor.requeue_delivery(queued, reason=str(result.error or "flush_send_failed"))
+            results.append(result)
         return results
 
     def _attempt_transport(self, request: DeliveryRequest, governor_data: dict[str, Any], attempts: int = 1) -> DeliveryResult:
