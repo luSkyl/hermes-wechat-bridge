@@ -1,4 +1,4 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to Hermes WeChat Bridge will be documented in this file.
 
@@ -16,6 +16,13 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 ### Changed
 
 - Prepared the Python package version as `0.1.0a4` for the complete integration-kit alpha artifact.
+### Distribution Kit
+
+- Added `distribution/manifest.lock.json` for the locked Hermes Core, Hermes Web UI, and Bridge combination.
+- Added `distribution/patches/hermes-core` with replayable Hermes runtime integration patches.
+- Added `distribution/overlays/hermes-web-ui` with the Web UI source overlay and public replay metadata.
+- Added Windows install, verify, build, start, stop, and rollback scripts for full distribution mode.
+- Repositioned the README around Bridge-only and full distribution workflows.
 ## [0.1.0-alpha.3] - 2026-05-18
 
 ### Added
@@ -63,4 +70,3 @@ The format follows the spirit of Keep a Changelog, and this project uses semanti
 ### Planned
 
 - Stable package release after alpha validation and PyPI trusted publishing setup.
-

@@ -1,0 +1,1503 @@
+﻿diff --git a/cron/scheduler.py b/cron/scheduler.py
+index d470e8c..ca7f9c8 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -132,12 +132,72 @@ SILENT_MARKER = "[SILENT]"
+ # Backward-compatible module override used by tests and emergency monkeypatches.
+ _hermes_home: Path | None = None
+ 
++_RAW_USER_VISIBLE_ERROR_MARKERS = (
++    "traceback",
++    "runtimeerror",
++    "httperror",
++    "http 5",
++    "http 429",
++    "ret=-2",
++    "errcode=-2",
++)
++
+ 
+ def _get_hermes_home() -> Path:
+     """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
+     return _hermes_home or get_hermes_home()
+ 
+ 
++def _friendly_card(
++    title: str,
++    *,
++    action: str,
++    result: str,
++    impact: str,
++    boundary: str,
++    next_step: str,
++) -> str:
++    lines = [
++        title,
++        "",
++        "【状态】",
++        f"动作｜{_sanitize_user_visible(action)}",
++        f"结果｜{_sanitize_user_visible(result)}",
++        f"影响｜{_sanitize_user_visible(impact)}",
++        f"边界｜{_sanitize_user_visible(boundary)}",
++        "",
++        "【下一步】",
++        _sanitize_user_visible(next_step),
++    ]
++    return "\n".join(lines)
++
++
++def _sanitize_user_visible(text: str) -> str:
++    value = str(text or "")
++    lowered = value.lower()
++    if any(marker in lowered for marker in _RAW_USER_VISIBLE_ERROR_MARKERS):
++        return "任务运行或上游服务暂时不可用；原始技术细节已写入本地任务输出。"
++    return value
++
++
++def _format_cron_failure_card(job: dict, error: str | None) -> str:
++    job_name = str(job.get("name") or job.get("id") or "未命名任务")
++    error_text = str(error or "任务未返回可展示结果")
++    safe_result = "任务没有完成，已停止继续重试。"
++    if "blocked" in error_text.lower() or "injection" in error_text.lower():
++        safe_result = "任务触发安全保护，已停止执行。"
++    elif "timeout" in error_text.lower() or "timed out" in error_text.lower():
++        safe_result = "任务执行超时，已保留现场。"
++    return _friendly_card(
++        f"⚠️ 定时任务未完成｜{job_name}",
++        action="已记录失败并停止本轮自动补发",
++        result=safe_result,
++        impact="不会把原始异常直接发到聊天里，也不会因为告警刷屏延长限流。",
++        boundary="详细堆栈、HTTP 状态和命令输出只保存在本地输出文件。",
++        next_step="我会在下一次调度周期重新执行；如果连续失败，请打开本地任务输出查看详情。",
++    )
++
++
+ def _get_lock_paths() -> tuple[Path, Path]:
+     """Resolve cron lock paths at call time so profile/env changes are honored."""
+     hermes_home = _get_hermes_home()
+@@ -585,7 +645,9 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+         # rooms (e.g. Matrix) where the standalone HTTP path cannot encrypt.
+         runtime_adapter = (adapters or {}).get(platform)
+         delivered = False
+-        if runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
++        if platform_name.lower() == "weixin":
++            logger.debug("Job '%s': using governed standalone Weixin delivery path", job["id"])
++        elif runtime_adapter is not None and loop is not None and getattr(loop, "is_running", lambda: False)():
+             send_metadata = {"thread_id": thread_id} if thread_id else None
+             try:
+                 # Send cleaned text (MEDIA tags stripped) — not the raw content
+@@ -805,19 +867,19 @@ def _run_job_script(script_path: str) -> tuple[bool, str]:
+             pass
+ 
+         if result.returncode != 0:
+-            parts = [f"Script exited with code {result.returncode}"]
++            parts = [f"脚本执行未完成，退出码 {result.returncode}。"]
+             if stderr:
+-                parts.append(f"stderr:\n{stderr}")
++                parts.append(f"错误输出摘要：\n{stderr}")
+             if stdout:
+-                parts.append(f"stdout:\n{stdout}")
++                parts.append(f"标准输出摘要：\n{stdout}")
+             return False, "\n".join(parts)
+ 
+         return True, stdout
+ 
+     except subprocess.TimeoutExpired:
+-        return False, f"Script timed out after {script_timeout}s: {path}"
++        return False, f"脚本执行超时，已在 {script_timeout} 秒后停止：{path}"
+     except Exception as exc:
+-        return False, f"Script execution failed: {exc}"
++        return False, f"脚本执行未完成：{exc}"
+ 
+ 
+ def _parse_wake_gate(script_output: str) -> bool:
+@@ -1752,7 +1814,7 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
+                 # Deliver the final response to the origin/target chat.
+                 # If the agent responded with [SILENT], skip delivery (but
+                 # output is already saved above).  Failed jobs always deliver.
+-                deliver_content = final_response if success else f"⚠️ Cron job '{job.get('name', job['id'])}' failed:\n{error}"
++                deliver_content = final_response if success else _format_cron_failure_card(job, error)
+                 should_deliver = bool(deliver_content)
+                 if should_deliver and success and SILENT_MARKER in deliver_content.strip().upper():
+                     logger.info("Job '%s': agent returned %s — skipping delivery", job["id"], SILENT_MARKER)
+diff --git a/gateway/platforms/weixin.py b/gateway/platforms/weixin.py
+index 1c9fec0..9110740 100644
+--- a/gateway/platforms/weixin.py
++++ b/gateway/platforms/weixin.py
+@@ -1632,6 +1632,8 @@ class WeixinAdapter(BasePlatformAdapter):
+                             last_error = RuntimeError(
+                                 f"iLink sendmessage rate limited: ret={ret} errcode={errcode} errmsg={errmsg}"
+                             )
++                            if os.getenv("WEIXIN_RATE_LIMIT_FAST_FAIL", "1").strip().lower() not in {"0", "false", "no", "off"}:
++                                break
+                             if attempt >= self._send_chunk_retries:
+                                 break
+                             wait = self._send_chunk_retry_delay_seconds * 3  # 3x backoff for rate limit
+diff --git a/gateway/platforms/weixin_delivery_governor.py b/gateway/platforms/weixin_delivery_governor.py
+new file mode 100644
+index 0000000..2e71b97
+--- /dev/null
++++ b/gateway/platforms/weixin_delivery_governor.py
+@@ -0,0 +1,720 @@
++"""Weixin outbound delivery governor.
++
++The governor is intentionally dependency-free so the bridge can ship it as the
++canonical implementation and Hermes runtime deployments can vendor or import it
++without pulling in an external scheduler stack.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import os
++import random
++import time
++import uuid
++from dataclasses import dataclass, field
++from pathlib import Path
++from typing import Any
++
++
++HEALTHY = "HEALTHY"
++OPEN = "OPEN"
++HALF_OPEN = "HALF_OPEN"
++DRAINING = "DRAINING"
++
++PRIORITY_VALUES = {
++    "critical": 100,
++    "high": 75,
++    "normal": 50,
++    "low": 25,
++}
++
++RATE_LIMIT_MARKERS = (
++    "ret=-2",
++    "errcode=-2",
++    "rate limited",
++    "ratelimited",
++    "too many requests",
++    "sendmessage rate limited",
++)
++
++RAW_ERROR_MARKERS = (
++    "ret=-2",
++    "errcode=-2",
++    "traceback",
++    "runtimeerror",
++    "httperror",
++    "http 5",
++    "http 429",
++)
++
++
++@dataclass(frozen=True)
++class WeixinDeliveryGovernorConfig:
++    enabled: bool = True
++    state_dir: Path | str | None = None
++    window_seconds: int = 60
++    initial_capacity: int = 3
++    min_capacity: int = 1
++    max_capacity: int = 20
++    max_flush_per_window: int = 3
++    queue_max_size: int = 500
++    base_backoff_seconds: int = 300
++    max_backoff_seconds: int = 3600
++    backoff_multiplier: float = 2.0
++    jitter_seconds: int = 15
++    lock_timeout_seconds: float = 2.0
++    lock_stale_seconds: float = 30.0
++    default_ttl_seconds: int = 7200
++    low_priority_ttl_seconds: int = 1800
++    high_priority_ttl_seconds: int = 21600
++    critical_ttl_seconds: int = 86400
++    hash_salt: str = ""
++
++    def resolved_state_dir(self) -> Path:
++        if self.state_dir is not None:
++            return Path(self.state_dir).expanduser()
++        base = os.getenv("WEIXIN_DELIVERY_GOVERNOR_STATE_DIR", "").strip()
++        if base:
++            return Path(base).expanduser()
++        hermes_home = os.getenv("HERMES_HOME", "").strip()
++        if hermes_home:
++            return Path(hermes_home).expanduser() / "weixin-delivery-governor"
++        return Path.home() / ".hermes" / "weixin-delivery-governor"
++
++
++@dataclass(frozen=True)
++class GovernorDecision:
++    allowed: bool
++    queued: bool
++    reason: str
++    status: str
++    delivery_id: str | None = None
++    queue_size: int = 0
++    remaining: int = 0
++    capacity: int = 0
++    next_available_at: float | None = None
++    target_hash: str | None = None
++    friendly_text: str | None = None
++    metadata: dict[str, Any] = field(default_factory=dict)
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "allowed": self.allowed,
++            "queued": self.queued,
++            "reason": self.reason,
++            "status": self.status,
++            "delivery_id": self.delivery_id,
++            "queue_size": self.queue_size,
++            "remaining": self.remaining,
++            "capacity": self.capacity,
++            "next_available_at": self.next_available_at,
++            "target_hash": self.target_hash,
++            "friendly_text": self.friendly_text,
++            "metadata": self.metadata,
++        }
++
++
++@dataclass(frozen=True)
++class QueuedDelivery:
++    delivery_id: str
++    message: str
++    priority: str
++    source: str
++    target_hash: str
++    created_at: float
++    expires_at: float
++    attempts: int = 0
++    metadata: dict[str, Any] = field(default_factory=dict)
++
++    @classmethod
++    def from_dict(cls, data: dict[str, Any]) -> "QueuedDelivery":
++        return cls(
++            delivery_id=str(data.get("delivery_id") or ""),
++            message=str(data.get("message") or ""),
++            priority=normalize_priority(data.get("priority")),
++            source=str(data.get("source") or "unknown"),
++            target_hash=str(data.get("target_hash") or ""),
++            created_at=float(data.get("created_at") or 0.0),
++            expires_at=float(data.get("expires_at") or 0.0),
++            attempts=int(data.get("attempts") or 0),
++            metadata=dict(data.get("metadata") or {}),
++        )
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "delivery_id": self.delivery_id,
++            "message": self.message,
++            "priority": self.priority,
++            "source": self.source,
++            "target_hash": self.target_hash,
++            "created_at": self.created_at,
++            "expires_at": self.expires_at,
++            "attempts": self.attempts,
++            "metadata": self.metadata,
++        }
++
++
++class WeixinDeliveryGovernor:
++    """File-backed rate-limit governor for Weixin/iLink outbound delivery."""
++
++    def __init__(self, config: WeixinDeliveryGovernorConfig | None = None) -> None:
++        self.config = config or WeixinDeliveryGovernorConfig()
++        self.state_dir = self.config.resolved_state_dir()
++        self.state_file = self.state_dir / "state.json"
++        self.lock_file = self.state_dir / "state.lock"
++
++    def admit_or_queue(
++        self,
++        message: str,
++        *,
++        target_id: str,
++        priority: str = "normal",
++        source: str = "unknown",
++        metadata: dict[str, Any] | None = None,
++        now: float | None = None,
++    ) -> GovernorDecision:
++        current_time = _now(now)
++        priority_name = normalize_priority(priority)
++        target_hash = self.hash_target(target_id)
++        if not self.config.enabled:
++            return GovernorDecision(
++                allowed=True,
++                queued=False,
++                reason="governor_disabled",
++                status=HEALTHY,
++                remaining=self.config.max_capacity,
++                capacity=self.config.max_capacity,
++                target_hash=target_hash,
++            )
++
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            status = self._effective_status(state, current_time)
++            if self._can_attempt(state, status):
++                state["status"] = status if status == HALF_OPEN else (DRAINING if state.get("queue") else HEALTHY)
++                state["attempts_in_window"] = int(state.get("attempts_in_window") or 0) + 1
++                if status == HALF_OPEN:
++                    state["half_open_in_flight"] = True
++                self._save_state(state)
++                return self._decision(
++                    state,
++                    allowed=True,
++                    queued=False,
++                    reason="allowed",
++                    target_hash=target_hash,
++                    now=current_time,
++                )
++
++            delivery = self._build_delivery(
++                message,
++                target_hash=target_hash,
++                priority=priority_name,
++                source=source,
++                metadata=metadata,
++                now=current_time,
++            )
++            queued, state = self._append_to_queue(state, delivery, current_time)
++            self._save_state(state)
++            reason = "queued_rate_limited" if status in {OPEN, HALF_OPEN} else "queued_quota_exhausted"
++            if not queued:
++                reason = "queue_full_expired_low_priority"
++            return self._decision(
++                state,
++                allowed=False,
++                queued=queued,
++                reason=reason,
++                target_hash=target_hash,
++                delivery_id=delivery.delivery_id if queued else None,
++                now=current_time,
++            )
++
++    def queue_delivery(
++        self,
++        message: str,
++        *,
++        target_id: str,
++        priority: str = "normal",
++        source: str = "unknown",
++        metadata: dict[str, Any] | None = None,
++        now: float | None = None,
++    ) -> GovernorDecision:
++        current_time = _now(now)
++        target_hash = self.hash_target(target_id)
++        delivery = self._build_delivery(
++            message,
++            target_hash=target_hash,
++            priority=normalize_priority(priority),
++            source=source,
++            metadata=metadata,
++            now=current_time,
++        )
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            queued, state = self._append_to_queue(state, delivery, current_time)
++            self._save_state(state)
++            return self._decision(
++                state,
++                allowed=False,
++                queued=queued,
++                reason="queued_after_rate_limit" if queued else "queue_full_expired_low_priority",
++                target_hash=target_hash,
++                delivery_id=delivery.delivery_id if queued else None,
++                now=current_time,
++            )
++
++    def reserve_next_queued(self, *, target_id: str, now: float | None = None) -> QueuedDelivery | None:
++        current_time = _now(now)
++        target_hash = self.hash_target(target_id)
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            status = self._effective_status(state, current_time)
++            if not self._can_attempt(state, status):
++                self._save_state(state)
++                return None
++
++            queue = [QueuedDelivery.from_dict(item) for item in state.get("queue", []) if isinstance(item, dict)]
++            matching = [item for item in queue if item.target_hash == target_hash]
++            if not matching:
++                self._save_state(state)
++                return None
++
++            selected = sorted(matching, key=_queue_sort_key)[0]
++            remaining_queue = [item for item in queue if item.delivery_id != selected.delivery_id]
++            reserved = QueuedDelivery(
++                delivery_id=selected.delivery_id,
++                message=selected.message,
++                priority=selected.priority,
++                source=selected.source,
++                target_hash=selected.target_hash,
++                created_at=selected.created_at,
++                expires_at=selected.expires_at,
++                attempts=selected.attempts + 1,
++                metadata=selected.metadata,
++            )
++            state["queue"] = [item.to_dict() for item in remaining_queue]
++            state["status"] = status if status == HALF_OPEN else (DRAINING if remaining_queue else HEALTHY)
++            state["attempts_in_window"] = int(state.get("attempts_in_window") or 0) + 1
++            if status == HALF_OPEN:
++                state["half_open_in_flight"] = True
++            self._save_state(state)
++            return reserved
++
++    def requeue_delivery(self, delivery: QueuedDelivery, *, reason: str = "send_failed", now: float | None = None) -> None:
++        current_time = _now(now)
++        if delivery.expires_at <= current_time:
++            return
++        metadata = dict(delivery.metadata)
++        metadata["last_requeue_reason"] = reason
++        queued = QueuedDelivery(
++            delivery_id=delivery.delivery_id,
++            message=delivery.message,
++            priority=delivery.priority,
++            source=delivery.source,
++            target_hash=delivery.target_hash,
++            created_at=delivery.created_at,
++            expires_at=delivery.expires_at,
++            attempts=delivery.attempts,
++            metadata=metadata,
++        )
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            queue = [item for item in state.get("queue", []) if item.get("delivery_id") != delivery.delivery_id]
++            queue.append(queued.to_dict())
++            state["queue"] = queue
++            state["status"] = DRAINING if state.get("status") == HEALTHY else state.get("status", DRAINING)
++            self._save_state(state)
++
++    def flush_plan(self, *, target_id: str, limit: int | None = None, now: float | None = None) -> list[QueuedDelivery]:
++        planned: list[QueuedDelivery] = []
++        max_items = max(0, limit if limit is not None else self.config.max_flush_per_window)
++        for _ in range(max_items):
++            item = self.reserve_next_queued(target_id=target_id, now=now)
++            if item is None:
++                break
++            planned.append(item)
++        return planned
++
++    def record_result(self, *, success: bool, error_text: str | None = None, now: float | None = None) -> dict[str, Any]:
++        current_time = _now(now)
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            rate_limited = is_rate_limited_result(error_text or "")
++            if rate_limited:
++                consecutive = int(state.get("consecutive_rate_limits") or 0) + 1
++                state["consecutive_rate_limits"] = consecutive
++                state["window_rate_limited"] = True
++                state["status"] = OPEN
++                state["open_until"] = current_time + self._backoff_seconds(consecutive)
++                state["half_open_in_flight"] = False
++                state["capacity"] = max(
++                    int(self.config.min_capacity),
++                    min(int(state.get("capacity") or self.config.initial_capacity) - 1, int(state.get("capacity") or 1) // 2),
++                )
++                state["last_rate_limited_at"] = current_time
++            elif success:
++                state["last_success_at"] = current_time
++                state["consecutive_failures"] = 0
++                if state.get("status") == HALF_OPEN:
++                    state["status"] = DRAINING if state.get("queue") else HEALTHY
++                    state["consecutive_rate_limits"] = 0
++                    state["open_until"] = None
++                    state["half_open_in_flight"] = False
++                elif state.get("status") == DRAINING and not state.get("queue"):
++                    state["status"] = HEALTHY
++            else:
++                state["consecutive_failures"] = int(state.get("consecutive_failures") or 0) + 1
++                if state.get("status") == HALF_OPEN:
++                    state["status"] = OPEN
++                    state["open_until"] = current_time + self._backoff_seconds(int(state.get("consecutive_rate_limits") or 1))
++                    state["half_open_in_flight"] = False
++            self._save_state(state)
++            return self._status_from_state(state, current_time)
++
++    def status(self, *, now: float | None = None) -> dict[str, Any]:
++        current_time = _now(now)
++        with _StateLock(self.lock_file, self.config.lock_timeout_seconds, self.config.lock_stale_seconds):
++            state = self._load_state(current_time)
++            state = self._refresh_state(state, current_time)
++            self._save_state(state)
++            return self._status_from_state(state, current_time)
++
++    def hash_target(self, target_id: str) -> str:
++        salt = self.config.hash_salt or os.getenv("WEIXIN_GOVERNOR_HASH_SALT", "")
++        return hashlib.sha256(f"{salt}:{target_id}".encode("utf-8", errors="replace")).hexdigest()[:20]
++
++    def _build_delivery(
++        self,
++        message: str,
++        *,
++        target_hash: str,
++        priority: str,
++        source: str,
++        metadata: dict[str, Any] | None,
++        now: float,
++    ) -> QueuedDelivery:
++        ttl = self._ttl_for_priority(priority)
++        return QueuedDelivery(
++            delivery_id=f"wxgov-{uuid.uuid4().hex[:16]}",
++            message=message,
++            priority=priority,
++            source=(source or "unknown")[:80],
++            target_hash=target_hash,
++            created_at=now,
++            expires_at=now + ttl,
++            metadata=sanitize_metadata(metadata or {}),
++        )
++
++    def _append_to_queue(self, state: dict[str, Any], delivery: QueuedDelivery, now: float) -> tuple[bool, dict[str, Any]]:
++        queue = [QueuedDelivery.from_dict(item) for item in state.get("queue", []) if isinstance(item, dict)]
++        queue = [item for item in queue if item.expires_at > now]
++        if len(queue) >= self.config.queue_max_size:
++            queue = sorted(queue, key=_queue_sort_key)
++            drop_index = next((idx for idx in range(len(queue) - 1, -1, -1) if queue[idx].priority == "low"), None)
++            if drop_index is None:
++                state["queue"] = [item.to_dict() for item in queue]
++                return False, state
++            queue.pop(drop_index)
++        queue.append(delivery)
++        state["queue"] = [item.to_dict() for item in queue]
++        if state.get("status") == HEALTHY:
++            state["status"] = DRAINING
++        return True, state
++
++    def _load_state(self, now: float) -> dict[str, Any]:
++        self.state_dir.mkdir(parents=True, exist_ok=True)
++        try:
++            data = json.loads(self.state_file.read_text(encoding="utf-8"))
++        except (FileNotFoundError, OSError, json.JSONDecodeError):
++            data = {}
++        if not isinstance(data, dict):
++            data = {}
++        return self._default_state(now) | data
++
++    def _save_state(self, state: dict[str, Any]) -> None:
++        self.state_dir.mkdir(parents=True, exist_ok=True)
++        payload = json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
++        temp_file = self.state_file.with_suffix(f".tmp-{uuid.uuid4().hex}")
++        temp_file.write_text(payload, encoding="utf-8")
++        temp_file.replace(self.state_file)
++
++    def _default_state(self, now: float) -> dict[str, Any]:
++        capacity = max(self.config.min_capacity, min(self.config.initial_capacity, self.config.max_capacity))
++        return {
++            "version": 1,
++            "status": HEALTHY,
++            "capacity": capacity,
++            "window_started_at": now,
++            "attempts_in_window": 0,
++            "window_rate_limited": False,
++            "consecutive_rate_limits": 0,
++            "consecutive_failures": 0,
++            "open_until": None,
++            "half_open_in_flight": False,
++            "queue": [],
++        }
++
++    def _refresh_state(self, state: dict[str, Any], now: float) -> dict[str, Any]:
++        window_started_at = float(state.get("window_started_at") or now)
++        if now - window_started_at >= self.config.window_seconds:
++            capacity = int(state.get("capacity") or self.config.initial_capacity)
++            attempts = int(state.get("attempts_in_window") or 0)
++            if state.get("window_rate_limited"):
++                capacity = max(self.config.min_capacity, capacity - 1)
++            elif attempts >= capacity and state.get("queue"):
++                capacity = min(self.config.max_capacity, capacity + 1)
++            state["capacity"] = capacity
++            state["window_started_at"] = now
++            state["attempts_in_window"] = 0
++            state["window_rate_limited"] = False
++
++        queue = [QueuedDelivery.from_dict(item) for item in state.get("queue", []) if isinstance(item, dict)]
++        state["queue"] = [item.to_dict() for item in queue if item.expires_at > now]
++        if state.get("status") == OPEN and state.get("open_until") is not None:
++            try:
++                if now >= float(state.get("open_until") or 0.0):
++                    state["status"] = HALF_OPEN
++                    state["half_open_in_flight"] = False
++            except (TypeError, ValueError):
++                state["status"] = HALF_OPEN
++                state["half_open_in_flight"] = False
++        if state.get("status") == DRAINING and not state.get("queue"):
++            state["status"] = HEALTHY
++        return state
++
++    def _effective_status(self, state: dict[str, Any], now: float) -> str:
++        status = str(state.get("status") or HEALTHY)
++        if status == OPEN:
++            open_until = state.get("open_until")
++            if open_until is not None and now >= float(open_until):
++                return HALF_OPEN
++        if status == HEALTHY and state.get("queue"):
++            return DRAINING
++        return status if status in {HEALTHY, OPEN, HALF_OPEN, DRAINING} else HEALTHY
++
++    def _can_attempt(self, state: dict[str, Any], status: str) -> bool:
++        if status == OPEN:
++            return False
++        capacity = int(state.get("capacity") or self.config.initial_capacity)
++        attempts = int(state.get("attempts_in_window") or 0)
++        if attempts >= capacity:
++            return False
++        if status == HALF_OPEN and state.get("half_open_in_flight"):
++            return False
++        return True
++
++    def _decision(
++        self,
++        state: dict[str, Any],
++        *,
++        allowed: bool,
++        queued: bool,
++        reason: str,
++        target_hash: str,
++        now: float,
++        delivery_id: str | None = None,
++    ) -> GovernorDecision:
++        status = self._effective_status(state, now)
++        capacity = int(state.get("capacity") or self.config.initial_capacity)
++        attempts = int(state.get("attempts_in_window") or 0)
++        decision = GovernorDecision(
++            allowed=allowed,
++            queued=queued,
++            reason=reason,
++            status=status,
++            delivery_id=delivery_id,
++            queue_size=len(state.get("queue", [])),
++            remaining=max(0, capacity - attempts),
++            capacity=capacity,
++            next_available_at=self._next_available_at(state, now),
++            target_hash=target_hash,
++            metadata={"window_seconds": self.config.window_seconds},
++        )
++        return GovernorDecision(**{**decision.to_dict(), "friendly_text": format_governor_decision_card(decision)})
++
++    def _status_from_state(self, state: dict[str, Any], now: float) -> dict[str, Any]:
++        status = self._effective_status(state, now)
++        capacity = int(state.get("capacity") or self.config.initial_capacity)
++        attempts = int(state.get("attempts_in_window") or 0)
++        return {
++            "enabled": self.config.enabled,
++            "status": status,
++            "capacity": capacity,
++            "attempts_in_window": attempts,
++            "remaining": max(0, capacity - attempts),
++            "queue_size": len(state.get("queue", [])),
++            "next_available_at": self._next_available_at(state, now),
++            "window_seconds": self.config.window_seconds,
++            "state_file": str(self.state_file),
++        }
++
++    def _next_available_at(self, state: dict[str, Any], now: float) -> float | None:
++        status = self._effective_status(state, now)
++        if status == OPEN and state.get("open_until") is not None:
++            return float(state["open_until"])
++        capacity = int(state.get("capacity") or self.config.initial_capacity)
++        attempts = int(state.get("attempts_in_window") or 0)
++        if attempts >= capacity:
++            return float(state.get("window_started_at") or now) + self.config.window_seconds
++        return None
++
++    def _backoff_seconds(self, consecutive: int) -> float:
++        base = self.config.base_backoff_seconds * (self.config.backoff_multiplier ** max(0, consecutive - 1))
++        bounded = min(float(self.config.max_backoff_seconds), float(base))
++        if self.config.jitter_seconds <= 0:
++            return bounded
++        return bounded + random.uniform(0, float(self.config.jitter_seconds))
++
++    def _ttl_for_priority(self, priority: str) -> int:
++        if priority == "critical":
++            return self.config.critical_ttl_seconds
++        if priority == "high":
++            return self.config.high_priority_ttl_seconds
++        if priority == "low":
++            return self.config.low_priority_ttl_seconds
++        return self.config.default_ttl_seconds
++
++
++class _StateLock:
++    def __init__(self, path: Path, timeout_seconds: float, stale_seconds: float) -> None:
++        self.path = path
++        self.timeout_seconds = timeout_seconds
++        self.stale_seconds = stale_seconds
++        self.fd: int | None = None
++
++    def __enter__(self) -> "_StateLock":
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        deadline = time.time() + self.timeout_seconds
++        while True:
++            try:
++                self.fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
++                os.write(self.fd, str(os.getpid()).encode("ascii", errors="ignore"))
++                return self
++            except FileExistsError:
++                self._remove_stale_lock()
++                if time.time() >= deadline:
++                    raise TimeoutError(f"Timed out waiting for Weixin governor lock: {self.path}")
++                time.sleep(0.05)
++
++    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
++        if self.fd is not None:
++            os.close(self.fd)
++            self.fd = None
++        try:
++            self.path.unlink(missing_ok=True)
++        except OSError:
++            pass
++
++    def _remove_stale_lock(self) -> None:
++        try:
++            if time.time() - self.path.stat().st_mtime > self.stale_seconds:
++                self.path.unlink(missing_ok=True)
++        except OSError:
++            pass
++
++
++def normalize_priority(priority: Any) -> str:
++    value = str(priority or "normal").strip().lower()
++    return value if value in PRIORITY_VALUES else "normal"
++
++
++def is_rate_limited_result(text: Any) -> bool:
++    haystack = json.dumps(text, ensure_ascii=False, default=str).lower() if not isinstance(text, str) else text.lower()
++    return any(marker in haystack for marker in RATE_LIMIT_MARKERS)
++
++
++def sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
++    sanitized: dict[str, Any] = {}
++    for key, value in metadata.items():
++        key_text = str(key)
++        if any(marker in key_text.lower() for marker in ("token", "secret", "password", "authorization", "chat_id")):
++            sanitized[key_text] = "***"
++        elif isinstance(value, (str, int, float, bool)) or value is None:
++            sanitized[key_text] = value
++        elif isinstance(value, list):
++            sanitized[key_text] = [item for item in value if isinstance(item, (str, int, float, bool))]
++        else:
++            sanitized[key_text] = str(value)[:200]
++    return sanitized
++
++
++def format_governor_decision_card(decision: GovernorDecision) -> str:
++    if decision.allowed:
++        return friendly_card(
++            "✅ 微信发送已通过治理检查",
++            action="已预留本周期发送名额",
++            result=f"本周期剩余 {decision.remaining}/{decision.capacity} 条",
++            impact="当前消息会继续发送，不会额外刷屏",
++            boundary="统计的是发送尝试次数，失败尝试也会占用额度",
++            next_step="如遇限流，我会自动进入保护队列并等待下一周期",
++        )
++    if decision.reason == "queue_full_expired_low_priority":
++        return friendly_card(
++            "📭 微信发送保护队列已满",
++            action="已丢弃过期或低优先级通知",
++            result="本条消息暂未进入微信发送链路",
++            impact="避免继续触发 iLink 限流，详细记录保留在本地状态里",
++            boundary="不会用微信解释微信限流，避免延长限制窗口",
++            next_step="请在本地/Web UI 查看详情，或提高通知优先级后重试",
++        )
++    return friendly_card(
++        "📌 微信发送已进入保护队列",
++        action="已暂停直接发送并排队",
++        result=f"当前队列 {decision.queue_size} 条，本周期剩余 {decision.remaining}/{decision.capacity} 条",
++        impact="你不会收到失败刷屏；通知会在后续可用周期合并或补发",
++        boundary="不会把原始错误、ret=-2 或堆栈内容发到聊天里",
++        next_step=_next_step_text(decision.next_available_at),
++    )
++
++
++def friendly_card(
++    title: str,
++    *,
++    action: str,
++    result: str,
++    impact: str,
++    boundary: str,
++    next_step: str,
++    extra_status: list[str] | None = None,
++) -> str:
++    lines = [
++        title,
++        "",
++        "【状态】",
++        f"动作｜{_sanitize_user_visible(action)}",
++        f"结果｜{_sanitize_user_visible(result)}",
++        f"影响｜{_sanitize_user_visible(impact)}",
++        f"边界｜{_sanitize_user_visible(boundary)}",
++    ]
++    lines.extend(_sanitize_user_visible(line) for line in (extra_status or []))
++    lines.extend(["", "【下一步】", _sanitize_user_visible(next_step)])
++    return "\n".join(lines)
++
++
++def _sanitize_user_visible(text: str) -> str:
++    sanitized = str(text or "")
++    lowered = sanitized.lower()
++    if any(marker in lowered for marker in RAW_ERROR_MARKERS):
++        return "微信发送链路正在保护中；原始技术细节已转入本地诊断记录。"
++    return sanitized
++
++
++def _next_step_text(next_available_at: float | None) -> str:
++    if next_available_at is None:
++        return "等待下一个发送名额释放后自动重试；如有多条通知会优先发送高优先级内容。"
++    wait_seconds = max(0, int(next_available_at - time.time()))
++    return f"预计约 {wait_seconds} 秒后进入下一次可发送窗口；高优先级通知会优先补发。"
++
++
++def _queue_sort_key(item: QueuedDelivery) -> tuple[int, float, int]:
++    return (-PRIORITY_VALUES.get(item.priority, PRIORITY_VALUES["normal"]), item.created_at, item.attempts)
++
++
++def _now(value: float | None) -> float:
++    return float(time.time() if value is None else value)
+diff --git a/gateway/run.py b/gateway/run.py
+index f9a282a..4156838 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -572,7 +572,7 @@ if _config_path.exists():
+         # initialized at module-import time (logger is defined further
+         # down this module).
+         print(
+-            f"  Warning: config.yaml → env bridge failed: "
++            f"  Notice: config.yaml → env bridge failed: "
+             f"{type(_bridge_err).__name__}: {_bridge_err}",
+             file=sys.stderr,
+         )
+@@ -589,21 +589,21 @@ try:
+     if isinstance(_network_cfg, dict) and _network_cfg.get("force_ipv4"):
+         apply_ipv4_preference(force=True)
+ except Exception as _bootstrap_exc:
+-    print(f"  Warning: IPv4 preference application failed: {_bootstrap_exc}", file=sys.stderr)
++    print(f"  Notice: IPv4 preference application failed: {_bootstrap_exc}", file=sys.stderr)
+ 
+ # Validate config structure early — log warnings so gateway operators see problems
+ try:
+     from hermes_cli.config import print_config_warnings
+     print_config_warnings()
+ except Exception as _bootstrap_exc:
+-    print(f"  Warning: config validation failed: {_bootstrap_exc}", file=sys.stderr)
++    print(f"  Notice: config validation failed: {_bootstrap_exc}", file=sys.stderr)
+ 
+ # Warn if user has deprecated MESSAGING_CWD / TERMINAL_CWD in .env
+ try:
+     from hermes_cli.config import warn_deprecated_cwd_env_vars
+     warn_deprecated_cwd_env_vars()
+ except Exception as _bootstrap_exc:
+-    print(f"  Warning: deprecation check failed: {_bootstrap_exc}", file=sys.stderr)
++    print(f"  Notice: deprecation check failed: {_bootstrap_exc}", file=sys.stderr)
+ 
+ # Gateway runs in quiet mode - suppress debug output and use cwd directly (no temp dirs)
+ os.environ["HERMES_QUIET"] = "1"
+@@ -2020,6 +2020,9 @@ class GatewayRunner:
+     def _status_action_gerund(self) -> str:
+         return "restarting" if self._restart_requested else "shutting down"
+ 
++    def _status_action_zh(self) -> str:
++        return "重启" if self._restart_requested else "关闭"
++
+     def _queue_during_drain_enabled(self) -> bool:
+         # Both "queue" and "steer" modes imply the user doesn't want messages
+         # to be lost during restart — queue them for the newly-spawned gateway
+@@ -2590,9 +2593,25 @@ class GatewayRunner:
+             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+             if self._queue_during_drain_enabled():
+                 self._queue_or_replace_pending_event(session_key, event)
+-                message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
++                message = (
++                    f"⏳ 网关正在{self._status_action_zh()}｜消息已进入下一轮队列\n\n"
++                    "【状态】\n"
++                    "动作｜已保留你的最新消息\n"
++                    "结果｜网关恢复后会自动继续处理\n"
++                    "影响｜不会丢消息，也不会重复刷屏\n"
++                    "边界｜当前轮次不会再追加新任务\n\n"
++                    "【下一步】\n请等待网关恢复；恢复后我会继续处理队列中的消息。"
++                )
+             else:
+-                message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
++                message = (
++                    f"⏳ 网关正在{self._status_action_zh()}｜暂不接收新轮次\n\n"
++                    "【状态】\n"
++                    "动作｜已拒绝本次追加输入\n"
++                    "结果｜当前会话正在收尾\n"
++                    "影响｜请稍后重发，避免状态切换时丢失上下文\n"
++                    "边界｜不会在收尾阶段启动第二个任务\n\n"
++                    "【下一步】\n等网关恢复后再发送这条消息。"
++                )
+ 
+             await adapter._send_with_retry(
+                 chat_id=event.source.chat_id,
+@@ -2699,18 +2718,33 @@ class GatewayRunner:
+         status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+         if is_steer_mode:
+             message = (
+-                f"⏩ Steered into current run{status_detail}. "
+-                f"Your message arrives after the next tool call."
++                f"⏩ 已接入当前任务｜消息会在下一次工具调用后生效\n\n"
++                "【状态】\n"
++                f"动作｜已尝试追加到当前运行{status_detail}\n"
++                "结果｜当前任务继续执行\n"
++                "影响｜不会开启第二个并发任务\n"
++                "边界｜如果工具调用长期无返回，仍会进入超时保护\n\n"
++                "【下一步】\n请等待当前任务继续输出。"
+             )
+         elif is_queue_mode:
+             message = (
+-                f"⏳ Queued for the next turn{status_detail}. "
+-                f"I'll respond once the current task finishes."
++                f"⏳ 已排到下一轮｜当前任务完成后处理\n\n"
++                "【状态】\n"
++                f"动作｜已保存你的后续消息{status_detail}\n"
++                "结果｜当前任务完成后会自动继续\n"
++                "影响｜不会打断正在执行的任务\n"
++                "边界｜短时间多条消息会合并，避免刷屏\n\n"
++                "【下一步】\n请等待当前任务结束，我会继续处理。"
+             )
+         else:
+             message = (
+-                f"⚡ Interrupting current task{status_detail}. "
+-                f"I'll respond to your message shortly."
++                f"⚡ 正在切换到你的新消息｜当前任务会被中断\n\n"
++                "【状态】\n"
++                f"动作｜已请求中断当前任务{status_detail}\n"
++                "结果｜会尽快处理你的新消息\n"
++                "影响｜当前任务可能不会继续输出\n"
++                "边界｜只发送一次中断确认\n\n"
++                "【下一步】\n请稍等，我会回复新的请求。"
+             )
+ 
+         # First-touch onboarding: the very first time a user sends a message
+@@ -6169,8 +6203,8 @@ class GatewayRunner:
+                     self._enqueue_fifo(_quick_key, queued_event, adapter)
+                 depth = self._queue_depth(_quick_key, adapter=self.adapters.get(source.platform))
+                 if depth <= 1:
+-                    return "Queued for the next turn."
+-                return f"Queued for the next turn. ({depth} queued)"
++                    return "⏳ 已排到下一轮｜当前任务完成后处理。"
++                return f"⏳ 已排到下一轮｜当前还有 {depth} 条待处理。"
+ 
+             # /steer <prompt> — inject mid-run after the next tool call.
+             # Unlike /queue (turn boundary), /steer lands BETWEEN tool-call
+@@ -6194,7 +6228,7 @@ class GatewayRunner:
+                             channel_prompt=event.channel_prompt,
+                         )
+                         adapter._pending_messages[_quick_key] = queued_event
+-                    return "Agent still starting — /steer queued for the next turn."
++                    return "⏳ 当前任务仍在启动｜/steer 已排到下一轮。"
+                 if running_agent and hasattr(running_agent, "steer"):
+                     try:
+                         accepted = running_agent.steer(steer_text)
+@@ -6203,7 +6237,7 @@ class GatewayRunner:
+                         return f"⚠️ Steer failed: {exc}"
+                     if accepted:
+                         preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
+-                        return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
++                        return f"⏩ Steer 已接入｜会在下一次工具调用后生效：'{preview}'"
+                     return "Steer rejected (empty payload)."
+                 # Running agent is missing or lacks steer() — fall back to queue.
+                 adapter = self.adapters.get(source.platform)
+@@ -6216,17 +6250,16 @@ class GatewayRunner:
+                         channel_prompt=event.channel_prompt,
+                     )
+                     adapter._pending_messages[_quick_key] = queued_event
+-                return "No active agent — /steer queued for the next turn."
++                return "⏳ 当前没有可接入的运行任务｜/steer 已排到下一轮。"
+ 
+             # /model must not be used while the agent is running.
+             if _cmd_def_inner and _cmd_def_inner.name == "model":
+-                return "Agent is running — wait or /stop first, then switch models."
++                return "⏳ 当前任务正在运行｜请等待完成，或先发送 /stop 后再切换模型。"
+ 
+             # /codex-runtime must not be used while the agent is running.
+             # Switching mid-turn would split a turn across two transports.
+             if _cmd_def_inner and _cmd_def_inner.name == "codex-runtime":
+-                return ("Agent is running — wait or /stop first, then "
+-                        "change runtime.")
++                return "⏳ 当前任务正在运行｜请等待完成，或先发送 /stop 后再切换运行时。"
+ 
+             # /approve and /deny must bypass the running-agent interrupt path.
+             # The agent thread is blocked on a threading.Event inside
+@@ -6265,7 +6298,7 @@ class GatewayRunner:
+                 _goal_arg = (event.get_command_args() or "").strip().lower()
+                 if not _goal_arg or _goal_arg in {"status", "pause", "resume", "clear", "stop", "done"}:
+                     return await self._handle_goal_command(event)
+-                return "Agent is running — use /goal status / pause / clear mid-run, or /stop before setting a new goal."
++                return "⏳ 当前任务正在运行｜可使用 /goal status、/goal pause 或 /goal clear；设置新目标前请先 /stop。"
+ 
+             # /subgoal is safe mid-run — it only modifies the goal's
+             # subgoals list, which the judge reads at the next turn
+@@ -6312,8 +6345,8 @@ class GatewayRunner:
+             # producing a zero-char response. See #5057, #6252, #10370.
+             if _cmd_def_inner:
+                 return (
+-                    f"⏳ Agent is running — `/{_cmd_def_inner.name}` can't run "
+-                    f"mid-turn. Wait for the current response or `/stop` first."
++                    f"⏳ 当前任务正在运行｜`/{_cmd_def_inner.name}` 不能在本轮中途执行。"
++                    "请等待当前回复完成，或先发送 `/stop`。"
+                 )
+ 
+             if event.message_type == MessageType.PHOTO:
+@@ -6372,9 +6405,9 @@ class GatewayRunner:
+                 if self._queue_during_drain_enabled():
+                     self._queue_or_replace_pending_event(_quick_key, event)
+                 return (
+-                    f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
++                    f"⏳ 网关正在{self._status_action_zh()}｜消息已进入下一轮队列。"
+                     if self._queue_during_drain_enabled()
+-                    else f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
++                    else f"⏳ 网关正在{self._status_action_zh()}｜暂不接收新轮次。"
+                 )
+             if self._busy_input_mode == "queue":
+                 logger.debug("PRIORITY queue follow-up for session %s", _quick_key)
+@@ -6664,7 +6697,7 @@ class GatewayRunner:
+             return await self._handle_voice_command(event)
+ 
+         if self._draining:
+-            return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
++            return f"⏳ 网关正在{self._status_action_zh()}｜暂不接收新任务。"
+ 
+         # User-defined quick commands (bypass agent loop, no LLM call)
+         if command:
+@@ -7748,9 +7781,13 @@ class GatewayRunner:
+             # looks like a bug; a short explanation is more helpful.
+             if response == "(empty)":
+                 response = (
+-                    "⚠️ The model returned no response after processing tool "
+-                    "results. This can happen with some models — try again or "
+-                    "rephrase your question."
++                    "⚠️ 模型本轮没有返回可展示内容\n\n"
++                    "【状态】\n"
++                    "动作｜已完成工具结果处理\n"
++                    "结果｜没有生成可发送的正文\n"
++                    "影响｜本轮不会展示空白或内部占位符\n"
++                    "边界｜不会把原始模型空响应直接发给你\n\n"
++                    "【下一步】\n请重试一次，或换一种问法；如果连续发生，我会保留诊断线索。"
+                 )
+             agent_messages = agent_result.get("messages", [])
+             _response_time = time.time() - _msg_start_time
+@@ -13185,7 +13222,7 @@ class GatewayRunner:
+             metadata = {"thread_id": thread_id} if thread_id else None
+             result = await adapter.send(
+                 str(chat_id),
+-                "♻ Gateway restarted successfully. Your session continues.",
++                "♻️ 网关已恢复｜会话可以继续\n\n【状态】\n动作｜已完成重启并恢复连接\n结果｜当前会话保持可用\n影响｜无需重新发送上一条消息\n边界｜仅发送一次恢复提示，避免刷屏\n\n【下一步】\n你可以继续对话；如果仍无响应，请发送 /reset。",
+                 metadata=metadata,
+             )
+             # adapter.send() catches provider errors (e.g. "Chat not found")
+@@ -13226,7 +13263,7 @@ class GatewayRunner:
+         """
+         delivered: set[tuple[str, str, Optional[str]]] = set()
+         skipped = skip_targets or set()
+-        message = "♻️ Gateway online — Hermes is back and ready."
++        message = "♻️ Hermes 网关已上线｜可以继续使用\n\n【状态】\n动作｜已完成启动检查\n结果｜消息入口已恢复\n影响｜后续消息会正常进入 Hermes\n边界｜只通知配置的主页渠道一次\n\n【下一步】\n你可以继续发送消息；如果正在等待旧任务，请查看任务状态。"
+ 
+         for platform, adapter in self.adapters.items():
+             home = self.config.get_home_channel(platform)
+@@ -16021,7 +16058,15 @@ class GatewayRunner:
+                 try:
+                     _notify_res = await _notify_adapter.send(
+                         source.chat_id,
+-                        f"⏳ Still working... ({_elapsed_mins} min elapsed{_status_detail})",
++                        (
++                            f"⏳ 任务仍在处理中｜已运行约 {_elapsed_mins} 分钟\n\n"
++                            "【状态】\n"
++                            f"动作｜继续等待后台任务{_status_detail}\n"
++                            "结果｜尚未完成，但仍有活动迹象\n"
++                            "影响｜我不会重复刷屏，只保留这一次进度提示\n"
++                            "边界｜如果后续无活动，会进入超时保护\n\n"
++                            "【下一步】\n你可以继续等待，或发送 /reset 取消当前会话。"
++                        ),
+                         metadata=_status_thread_metadata,
+                     )
+                     if (
+@@ -16118,10 +16163,15 @@ class GatewayRunner:
+                             try:
+                                 await _warn_adapter.send(
+                                     source.chat_id,
+-                                    f"⚠️ No activity for {_elapsed_warn} min. "
+-                                    f"If the agent does not respond soon, it will "
+-                                    f"be timed out in {_remaining_mins} min. "
+-                                    f"You can continue waiting or use /reset.",
++                                    (
++                                        f"⚠️ 会话活动变慢｜约 {_elapsed_warn} 分钟没有新进展\n\n"
++                                        "【状态】\n"
++                                        "动作｜已启动超时保护观察\n"
++                                        f"结果｜如果仍无活动，约 {_remaining_mins} 分钟后会自动停止\n"
++                                        "影响｜避免后台任务无限占用会话\n"
++                                        "边界｜不会重复发送原始错误或内部堆栈\n\n"
++                                        "【下一步】\n你可以继续等待，或发送 /reset 立即重置。"
++                                    ),
+                                     metadata=_status_thread_metadata,
+                                 )
+                             except Exception as _warn_err:
+diff --git a/gateway/session.py b/gateway/session.py
+index dfa2ca9..8cfb718 100644
+--- a/gateway/session.py
++++ b/gateway/session.py
+@@ -688,7 +688,7 @@ class SessionStore:
+             from hermes_state import SessionDB
+             self._db = SessionDB()
+         except Exception as e:
+-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
++            logger.warning("SQLite session store unavailable, falling back to JSONL: %s", e)
+     
+     def _ensure_loaded(self) -> None:
+         """Load sessions index from disk if not already loaded."""
+@@ -714,7 +714,7 @@ class SessionStore:
+                             # Skip entries with unknown/removed platform values
+                             continue
+             except Exception as e:
+-                print(f"[gateway] Warning: Failed to load sessions: {e}")
++                logger.warning("Failed to load sessions: %s", e)
+ 
+         self._loaded = True
+     
+@@ -950,7 +950,7 @@ class SessionStore:
+             try:
+                 self._db.create_session(**db_create_kwargs)
+             except Exception as e:
+-                print(f"[gateway] Warning: Failed to create SQLite session: {e}")
++                logger.warning("Failed to create SQLite session: %s", e)
+ 
+         return entry
+ 
+diff --git a/tests/conftest.py b/tests/conftest.py
+index aa2b1b1..f5c02f0 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -223,6 +223,9 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
+     "DINGTALK_ALLOWED_USERS",
+     "FEISHU_ALLOWED_USERS",
+     "WECOM_ALLOWED_USERS",
++    "WEIXIN_ALLOWED_USERS",
++    "WEIXIN_GROUP_ALLOWED_USERS",
++    "WEIXIN_ALLOW_ALL_USERS",
+     "GATEWAY_ALLOWED_USERS",
+     "GATEWAY_ALLOW_ALL_USERS",
+     "TELEGRAM_ALLOW_ALL_USERS",
+@@ -271,6 +274,15 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
+     "WECOM_HOME_CHANNEL",
+     "WECOM_HOME_CHANNEL_THREAD_ID",
+     "WECOM_HOME_CHANNEL_NAME",
++    "WEIXIN_HOME_CHANNEL",
++    "WEIXIN_HOME_CHANNEL_THREAD_ID",
++    "WEIXIN_HOME_CHANNEL_NAME",
++    "WEIXIN_DM_POLICY",
++    "WEIXIN_GROUP_POLICY",
++    "WEIXIN_SPLIT_MULTILINE_MESSAGES",
++    "WEIXIN_ACCOUNT_ID",
++    "WEIXIN_BASE_URL",
++    "WEIXIN_CDN_BASE_URL",
+     # Platform gating — set by load_gateway_config() as a side effect when
+     # a config.yaml is present, so individual test bodies that call the
+     # loader leak these values into later tests on the same xdist worker.
+diff --git a/tests/cron/test_scheduler.py b/tests/cron/test_scheduler.py
+index e0cb1cc..0995f43 100644
+--- a/tests/cron/test_scheduler.py
++++ b/tests/cron/test_scheduler.py
+@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
+ 
+ import pytest
+ 
+-from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt
++from cron.scheduler import _resolve_origin, _resolve_delivery_target, _deliver_result, _send_media_via_adapter, run_job, SILENT_MARKER, _build_job_prompt, _format_cron_failure_card
+ from tools.env_passthrough import clear_env_passthrough
+ from tools.credential_files import clear_credential_files
+ 
+@@ -597,6 +597,47 @@ class TestDeliverResultWrapping:
+         voice_call = adapter.send_voice.call_args
+         assert voice_call[1]["audio_path"] == "/tmp/cron-voice.mp3"
+ 
++    def test_weixin_delivery_bypasses_live_adapter_for_governor(self):
++        """Weixin cron delivery must use the governed standalone path even when a live adapter exists."""
++        from gateway.config import Platform
++
++        adapter = AsyncMock()
++        adapter.send.return_value = MagicMock(success=True)
++        pconfig = MagicMock()
++        pconfig.enabled = True
++        mock_cfg = MagicMock()
++        mock_cfg.platforms = {Platform.WEIXIN: pconfig}
++        loop = MagicMock()
++        loop.is_running.return_value = True
++        job = {
++            "id": "weixin-governed",
++            "deliver": "origin",
++            "origin": {"platform": "weixin", "chat_id": "wxid_target"},
++        }
++
++        standalone_send = AsyncMock(return_value={"success": True, "governed": True})
++        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
++             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}), \
++             patch("tools.send_message_tool._send_to_platform", new=standalone_send):
++            result = _deliver_result(job, "hello", adapters={Platform.WEIXIN: adapter}, loop=loop)
++
++        assert result is None
++        adapter.send.assert_not_called()
++        standalone_send.assert_awaited_once()
++
++    def test_cron_failure_card_hides_raw_error_markers(self):
++        card = _format_cron_failure_card(
++            {"id": "job-1", "name": "daily"},
++            "RuntimeError: HTTP 502 ret=-2 Traceback: boom",
++        )
++
++        assert "【状态】" in card
++        assert "【下一步】" in card
++        assert "RuntimeError" not in card
++        assert "HTTP 502" not in card
++        assert "ret=-2" not in card
++        assert "Traceback" not in card
++
+     def test_live_adapter_routes_image_to_send_image_file(self):
+         """Image MEDIA files should be routed to send_image_file, not send_voice."""
+         from gateway.config import Platform
+diff --git a/tests/tools/test_send_message_tool.py b/tests/tools/test_send_message_tool.py
+index fa810eb..74dc2c2 100644
+--- a/tests/tools/test_send_message_tool.py
++++ b/tests/tools/test_send_message_tool.py
+@@ -4,6 +4,7 @@ import asyncio
+ import json
+ import os
+ import sys
++import time
+ from pathlib import Path
+ from types import SimpleNamespace
+ from unittest.mock import AsyncMock, MagicMock, patch
+@@ -28,6 +29,7 @@ from tools.send_message_tool import (
+     _send_matrix_via_adapter,
+     _send_signal,
+     _send_telegram,
++    _send_weixin,
+     _send_to_platform,
+     send_message_tool,
+ )
+@@ -45,6 +47,49 @@ def _make_config():
+     ), telegram_cfg
+ 
+ 
++class TestWeixinDeliveryGovernor:
++    def test_rate_limit_queues_after_counted_attempt(self, tmp_path, monkeypatch):
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_STATE_DIR", str(tmp_path / "governor"))
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_INITIAL_CAPACITY", "1")
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_BASE_BACKOFF_SECONDS", "60")
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_MAX_BACKOFF_SECONDS", "60")
++        pconfig = SimpleNamespace(extra={}, token="token")
++
++        async def fake_send_weixin_direct(**_kwargs):
++            return {"error": "iLink sendmessage rate limited: ret=-2 errcode=-2"}
++
++        with patch("gateway.platforms.weixin.check_weixin_requirements", return_value=True), \
++             patch("gateway.platforms.weixin.send_weixin_direct", new=AsyncMock(side_effect=fake_send_weixin_direct)) as send_mock:
++            result = asyncio.run(_send_weixin(pconfig, "wxid_target", "hello"))
++
++        assert result["success"] is True
++        assert result["governed"] is True
++        assert result["queued"] is True
++        assert result["reason"] == "queued_after_rate_limit"
++        assert "ret=-2" not in result["friendly_card"]
++        send_mock.assert_awaited_once()
++
++    def test_open_governor_blocks_without_calling_ilink(self, tmp_path, monkeypatch):
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_STATE_DIR", str(tmp_path / "governor"))
++        monkeypatch.setenv("WEIXIN_DELIVERY_GOVERNOR_INITIAL_CAPACITY", "1")
++        pconfig = SimpleNamespace(extra={}, token="token")
++        from gateway.platforms.weixin_delivery_governor import WeixinDeliveryGovernor
++        governor = WeixinDeliveryGovernor()
++        current_time = time.time()
++        assert governor.admit_or_queue("first", target_id="wxid_target", now=current_time).allowed is True
++        governor.record_result(success=False, error_text="rate limited ret=-2", now=current_time + 1)
++
++        with patch("gateway.platforms.weixin.check_weixin_requirements", return_value=True), \
++             patch("gateway.platforms.weixin.send_weixin_direct", new=AsyncMock(return_value={"success": True})) as send_mock:
++            result = asyncio.run(_send_weixin(pconfig, "wxid_target", "second"))
++
++        assert result["success"] is True
++        assert result["queued"] is True
++        assert result["governed"] is True
++        assert result["reason"] == "queued_rate_limited"
++        send_mock.assert_not_awaited()
++
++
+ def _install_telegram_mock(monkeypatch, bot):
+     parse_mode = SimpleNamespace(MARKDOWN_V2="MarkdownV2", HTML="HTML")
+     constants_mod = SimpleNamespace(ParseMode=parse_mode)
+diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
+index d5b2c0c..2fa7440 100644
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -395,6 +395,82 @@ def _get_cron_auto_delivery_target():
+     }
+ 
+ 
++def _get_weixin_delivery_source() -> str:
++    from gateway.session_context import get_session_env
++    explicit = os.getenv("HERMES_WEIXIN_DELIVERY_SOURCE", "").strip()
++    if explicit:
++        return explicit[:80]
++    if os.getenv("HERMES_GUARDIAN_RUN", "").strip():
++        return "guardian"
++    if get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM", ""):
++        return "cron"
++    session_platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip()
++    return session_platform[:80] if session_platform else "send_message_tool"
++
++
++def _get_weixin_delivery_priority() -> str:
++    value = os.getenv("HERMES_WEIXIN_DELIVERY_PRIORITY", "").strip().lower()
++    return value if value in {"critical", "high", "normal", "low"} else "normal"
++
++
++def _weixin_governor_config_from_env():
++    from gateway.platforms.weixin_delivery_governor import WeixinDeliveryGovernorConfig
++
++    def _env_int(name: str, default: int) -> int:
++        try:
++            return int(os.getenv(name, "").strip() or default)
++        except (TypeError, ValueError):
++            return default
++
++    def _env_bool(name: str, default: bool) -> bool:
++        value = os.getenv(name, "").strip().lower()
++        if value in {"1", "true", "yes", "on"}:
++            return True
++        if value in {"0", "false", "no", "off"}:
++            return False
++        return default
++
++    state_dir = os.getenv("WEIXIN_DELIVERY_GOVERNOR_STATE_DIR", "").strip() or None
++    return WeixinDeliveryGovernorConfig(
++        enabled=_env_bool("WEIXIN_DELIVERY_GOVERNOR_ENABLED", True),
++        state_dir=state_dir,
++        window_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_WINDOW_SECONDS", 60),
++        initial_capacity=_env_int("WEIXIN_DELIVERY_GOVERNOR_INITIAL_CAPACITY", 3),
++        min_capacity=_env_int("WEIXIN_DELIVERY_GOVERNOR_MIN_CAPACITY", 1),
++        max_capacity=_env_int("WEIXIN_DELIVERY_GOVERNOR_MAX_CAPACITY", 20),
++        max_flush_per_window=_env_int("WEIXIN_DELIVERY_GOVERNOR_MAX_FLUSH_PER_WINDOW", 3),
++        queue_max_size=_env_int("WEIXIN_DELIVERY_GOVERNOR_QUEUE_MAX_SIZE", 500),
++        base_backoff_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_BASE_BACKOFF_SECONDS", 300),
++        max_backoff_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_MAX_BACKOFF_SECONDS", 3600),
++        low_priority_ttl_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_LOW_TTL_SECONDS", 1800),
++        default_ttl_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_DEFAULT_TTL_SECONDS", 7200),
++        high_priority_ttl_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_HIGH_TTL_SECONDS", 21600),
++        critical_ttl_seconds=_env_int("WEIXIN_DELIVERY_GOVERNOR_CRITICAL_TTL_SECONDS", 86400),
++        hash_salt=os.getenv("WEIXIN_DELIVERY_GOVERNOR_HASH_SALT", ""),
++    )
++
++
++def _get_weixin_governor():
++    from gateway.platforms.weixin_delivery_governor import WeixinDeliveryGovernor
++    return WeixinDeliveryGovernor(_weixin_governor_config_from_env())
++
++
++def _weixin_governed_result(decision) -> dict:
++    return {
++        "success": True,
++        "platform": "weixin",
++        "queued": True,
++        "governed": True,
++        "reason": decision.reason,
++        "delivery_id": decision.delivery_id,
++        "queue_size": decision.queue_size,
++        "remaining": decision.remaining,
++        "capacity": decision.capacity,
++        "next_available_at": decision.next_available_at,
++        "friendly_card": decision.friendly_text,
++    }
++
++
+ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id: str | None):
+     """Skip redundant cron send_message calls when the scheduler will auto-deliver there."""
+     auto_target = _get_cron_auto_delivery_target()
+@@ -1659,20 +1735,82 @@ async def _send_weixin(pconfig, chat_id, message, media_files=None):
+     """Send via Weixin iLink using the native adapter helper."""
+     try:
+         from gateway.platforms.weixin import check_weixin_requirements, send_weixin_direct
++        from gateway.platforms.weixin_delivery_governor import is_rate_limited_result
+         if not check_weixin_requirements():
+             return {"error": "Weixin requirements not met. Need aiohttp + cryptography."}
+     except ImportError:
+         return {"error": "Weixin adapter not available."}
+ 
++    governor = _get_weixin_governor()
++    source = _get_weixin_delivery_source()
++    priority = _get_weixin_delivery_priority()
++    decision = governor.admit_or_queue(
++        message,
++        target_id=chat_id,
++        priority=priority,
++        source=source,
++        metadata={"media_count": len(media_files or []), "source": source},
++    )
++    if not decision.allowed:
++        return _weixin_governed_result(decision)
++
++    reserved = None
+     try:
+-        return await send_weixin_direct(
++        result = await send_weixin_direct(
+             extra=pconfig.extra,
+             token=pconfig.token,
+             chat_id=chat_id,
+             message=message,
+             media_files=media_files,
+         )
++        if isinstance(result, dict) and result.get("error"):
++            error_text = str(result.get("error") or "")
++            governor.record_result(success=False, error_text=error_text)
++            if is_rate_limited_result(error_text):
++                decision = governor.queue_delivery(
++                    message,
++                    target_id=chat_id,
++                    priority=priority,
++                    source=source,
++                    metadata={"media_count": len(media_files or []), "source": source, "after_attempt": True},
++                )
++                return _weixin_governed_result(decision)
++            return result
++        governor.record_result(success=True)
++
++        flush_limit = int(os.getenv("WEIXIN_DELIVERY_GOVERNOR_FLUSH_AFTER_SUCCESS", "1") or "1")
++        for reserved in governor.flush_plan(target_id=chat_id, limit=max(0, flush_limit)):
++            queued_result = await send_weixin_direct(
++                extra=pconfig.extra,
++                token=pconfig.token,
++                chat_id=chat_id,
++                message=reserved.message,
++                media_files=None,
++            )
++            if isinstance(queued_result, dict) and queued_result.get("error"):
++                queued_error = str(queued_result.get("error") or "")
++                governor.record_result(success=False, error_text=queued_error)
++                governor.requeue_delivery(reserved, reason="flush_rate_limited" if is_rate_limited_result(queued_error) else "flush_send_failed")
++                break
++            governor.record_result(success=True)
++        if isinstance(result, dict):
++            result["governed"] = True
++            result["governor"] = decision.to_dict()
++        return result
+     except Exception as e:
++        error_text = str(e)
++        governor.record_result(success=False, error_text=error_text)
++        if reserved is not None:
++            governor.requeue_delivery(reserved, reason="flush_exception")
++        if is_rate_limited_result(error_text):
++            decision = governor.queue_delivery(
++                message,
++                target_id=chat_id,
++                priority=priority,
++                source=source,
++                metadata={"media_count": len(media_files or []), "source": source, "after_exception": True},
++            )
++            return _weixin_governed_result(decision)
+         return _error(f"Weixin send failed: {e}")
+ 
+ 

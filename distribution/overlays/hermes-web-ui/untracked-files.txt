@@ -1,0 +1,4 @@
+﻿packages/client/src/utils/friendly-notice.ts
+packages/server/src/lib/friendly-error.ts
+tests/client/friendly-notice.test.ts
+tests/server/friendly-error.test.ts

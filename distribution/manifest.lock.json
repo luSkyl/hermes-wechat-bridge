@@ -1,0 +1,51 @@
+﻿{
+    "schema_version":  1,
+    "name":  "hermes-wechat-distribution",
+    "version":  "0.1.0-alpha.4",
+    "generated_at":  "2026-05-19T13:16:35.2947423+08:00",
+    "bridge":  {
+                   "repo":  "https://github.com/luSkyl/hermes-wechat-bridge.git",
+                   "package":  "hermes-wechat-bridge",
+                   "version":  "0.1.0a4",
+                   "recommended_tag":  "v0.1.0-alpha.4",
+                   "ref":  "v0.1.0-alpha.4",
+                   "distribution_source":  "same-repository-release-tag"
+               },
+    "core":  {
+                 "repo":  "https://github.com/NousResearch/hermes-agent.git",
+                 "ref":  "v2026.5.16",
+                 "version":  "v0.14.0",
+                 "release":  "v2026.5.16",
+                 "patches":  [
+                                 {
+                                     "path":  "patches/hermes-core/0001-wechat-delivery-governor-runtime-integration.patch",
+                                     "sha256":  "accabd08c11d64fd99c28cd36fcdaa1cbf30ae24482f2b77c0fdc18ef4d6d8dd",
+                                     "description":  "Weixin delivery governor and runtime notification integration."
+                                 }
+                             ]
+             },
+    "web_ui":  {
+                   "package":  "hermes-web-ui",
+                   "upstream_version":  "0.5.28",
+                   "upstream_ref":  "v0.5.28",
+                   "local_release":  "0.5.28-local.1",
+                   "overlay":  "overlays/hermes-web-ui",
+                   "overlay_patch_sha256":  "8eb23ae4b50fc6cd2ceabc61045625cafa1758bc6e300e6e8349e94d958d7580"
+               },
+    "runtime":  {
+                    "default_web_ui_port":  8648,
+                    "default_shadow_port":  8650,
+                    "default_bridge_port":  8787,
+                    "windows_first":  true,
+                    "manifest_is_source_of_truth":  true
+                },
+    "exclusions":  [
+                       "secrets",
+                       "tokens",
+                       "wechat login state",
+                       "local .env",
+                       "runtime logs",
+                       "node_modules",
+                       "built release bundles"
+                   ]
+}

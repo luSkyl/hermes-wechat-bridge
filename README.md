@@ -1,4 +1,4 @@
-# Hermes WeChat Bridge
+﻿# Hermes WeChat Bridge & Distribution Kit
 
 [![CI](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml)
@@ -6,152 +6,112 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-Hermes WeChat Bridge is the clean sidecar for connecting **Hermes Agent** to **WeChat** without forking, patching, or polluting Hermes core or Hermes Web UI.
+Hermes WeChat Bridge is a Windows-first integration kit for running **Hermes Agent + Hermes Web UI + WeChat Bridge** as one reproducible local distribution.
 
-It gives you one opinionated golden path:
+It supports two modes:
+
+- **Bridge-only mode**: install the Python sidecar that normalizes WeChat events, routes them to Hermes, governs delivery, and exposes diagnostics.
+- **Full distribution mode**: apply the pinned Hermes Core patch set, replay the Hermes Web UI overlay, install the bridge, and verify the complete runtime.
 
 ```text
-WeChat User -> WeChat Callback -> Bridge Runtime -> Hermes Agent -> Friendly Reply
+WeChat User -> Bridge Runtime -> Hermes Agent -> Friendly Reply
+                         |-> Delivery Governor / Dedupe / Retry
+                         |-> Hermes Web UI Local Overlay
 ```
-
-The bridge owns the WeChat runtime: callback normalization, signature checks, session mapping, dedupe, retry, graceful degradation, friendly user replies, local simulation, and operational diagnostics. Hermes and Hermes Web UI stay independently upgradeable.
-
-## Why This Exists
-
-Most WeChat integrations become hard to maintain because channel-specific code leaks into the agent runtime, UI, deployment scripts, and private configs. This project keeps those concerns separate:
-
-| Project | Responsibility |
-|---|---|
-| Hermes Agent | Agent reasoning, tools, and conversation behavior |
-| Hermes Web UI | Human-facing control plane and observation surface |
-| Hermes WeChat Bridge | WeChat callback, delivery, reliability, service API, and simulator |
 
 ## What You Get
 
-- **Stable bridge contract**: normalized message protocol between WeChat and Hermes.
-- **Safe local development**: simulator fixtures run without real WeChat credentials.
-- **Production guardrails**: signature verification, service API token checks, retry, dedupe, delivery governor, and health/status endpoints.
-- **Complete notification loop**: friendly-card templates, `send_message_tool`-style notifier, Cron adapter, Guardian adapter, governed queue, and flush API.
-- **Upgrade-friendly boundary**: compatibility tests and docs make Hermes/Hermes Web UI upgrades contract-driven.
-- **Open-source ready workflow**: CI, CodeQL, Scorecard, Dependabot, release assets, governance, and security policy.
+- **Clean bridge package** in `bridge/` with callback normalization, signature checks, simulation, service APIs, governed notifications, and Hermes native shims.
+- **Full distribution layer** in `distribution/` with a locked component manifest, Hermes Core patches, Hermes Web UI overlay, install/verify/start/rollback scripts, and Windows docs.
+- **Upgrade-friendly boundaries**: Core changes are patches, Web UI changes are overlay files, and the bridge remains a normal Python package.
+- **Safety by default**: no tokens, WeChat login state, logs, `node_modules`, built runtime bundles, or local secrets are committed.
 
-## Quick Start
-
-Clone the repository and run the bridge in mock Hermes mode:
+## Quick Start: Bridge Only
 
 ```powershell
 git clone https://github.com/luSkyl/hermes-wechat-bridge.git
 cd hermes-wechat-bridge
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e .[dev]
+python -m pip install -e .[dev,yaml]
 python -m bridge.cli doctor --config examples/minimal/config.yaml
 python -m bridge.cli simulate --config examples/minimal/config.yaml --event simulator/sample_events/text.json
 python -m bridge.cli serve --config examples/minimal/config.yaml --host 127.0.0.1 --port 8787
-python -m bridge.cli notify --config examples/minimal/config.yaml --target wxid_home --title "上游模型已恢复" --text "模型恢复后需要重新执行定时任务。" --priority high
-python -m bridge.cli flush --config examples/minimal/config.yaml --target wxid_home --limit 3
-python -m bridge.cli install-hermes-native --hermes-home ./.demo-hermes-home --config examples/hermes-native/config.yaml --target wxid_home --force
-python -m bridge.cli verify-hermes-native --hermes-home ./.demo-hermes-home
 ```
 
-Expected simulator output includes a delivered dry-run reply from the bridge runtime:
+## Quick Start: Full Distribution
 
-```json
-{
-  "status": "delivered",
-  "reply_text": "Hermes mock reply: ..."
-}
-```
-
-Prefer a released artifact? Download the wheel or source archive from [Releases](https://github.com/luSkyl/hermes-wechat-bridge/releases), or install a pinned tag directly:
+The distribution scripts assemble a complete local Hermes WeChat runtime from pinned sources:
 
 ```powershell
-python -m pip install "git+https://github.com/luSkyl/hermes-wechat-bridge.git@v0.1.0-alpha.1"
+git clone https://github.com/luSkyl/hermes-wechat-bridge.git
+cd hermes-wechat-bridge
+powershell -ExecutionPolicy Bypass -File distribution\scripts\install.ps1 -HermesWorkspaceRoot C:\Hermes\hermes-dist-test
+powershell -ExecutionPolicy Bypass -File distribution\scripts\verify.ps1 -HermesWorkspaceRoot C:\Hermes\hermes-dist-test -SkipBridgeHttp
 ```
 
-## Gateway Flow
+For an existing Hermes workspace, run verification first:
 
-```mermaid
-flowchart LR
-  U["WeChat User"] --> W["WeChat Callback"]
-  W --> A["WeChat Adapter"]
-  A --> R["Gateway Router"]
-  R --> H["Hermes Client"]
-  H --> HA["Hermes Agent"]
-  HA --> H
-  H --> R
-  R --> D["Delivery + Dedupe + Retry + Governor"]
-  D --> A
-  A --> U
+```powershell
+powershell -ExecutionPolicy Bypass -File distribution\scripts\verify.ps1 -HermesWorkspaceRoot C:\Hermes\hermes -SkipBridgeHttp
 ```
 
-## Service API
+## Distribution Contents
 
-The callback server also exposes a small service surface for operators and future Web UI integration:
+```text
+distribution/
+├─ manifest.lock.json                 # pinned Core/Web UI/Bridge versions and hashes
+├─ config.example.yaml                 # safe dry-run bridge config
+├─ overlays/hermes-web-ui/             # replayable Web UI source overlay
+├─ patches/hermes-core/                # Hermes Core source patches
+├─ scripts/install.ps1                 # orchestrated install flow
+├─ scripts/verify.ps1                  # health and runtime verification
+├─ scripts/build-web-ui.ps1            # official Web UI + overlay -> local release
+├─ scripts/apply-core-patches.ps1      # patch a clean Hermes Core checkout
+├─ scripts/install-bridge.ps1          # install bridge package
+├─ scripts/start.ps1                   # start runtime surfaces
+├─ scripts/stop.ps1                    # stop local ports
+└─ scripts/rollback.ps1                # switch Web UI back to a fallback release
+```
 
-| Endpoint | Purpose |
+Current locked combination:
+
+| Layer | Version / Ref |
 |---|---|
-| `GET /health` | Liveness check |
-| `GET /status` | Bridge status and configured capabilities |
-| `POST /simulate` | Run a simulated event through the bridge |
-| `POST /sessions/{id}/message` | Send a controlled message into a session |
+| Hermes Core | `v2026.5.16` |
+| Hermes Web UI | official `0.5.28` + local overlay -> `0.5.28-local.1` |
+| Hermes WeChat Bridge | `0.1.0a4` / planned tag `v0.1.0-alpha.4` |
 
-When binding to a non-loopback host, `runtime.service_api_token` is required so operational APIs do not become accidentally public.
+## Architecture
 
-## Production Shape
+| Layer | Location | Responsibility |
+|---|---|---|
+| Bridge package | `bridge/` | WeChat callback/service runtime, simulator, governed delivery, diagnostics |
+| Core patch set | `distribution/patches/hermes-core/` | Hermes runtime notification/governor integration |
+| Web UI overlay | `distribution/overlays/hermes-web-ui/` | Friendly notices, semantic message cards, chat protocol support |
+| Installer | `distribution/scripts/` | Build, install, verify, start, stop, rollback |
 
-- Start with `examples/minimal/config.yaml`, then replace placeholders with your WeChat and Hermes settings.
-- Keep real tokens in environment-specific secret stores; do not commit production configs.
-- Put the bridge behind HTTPS before pointing WeChat callbacks at it.
-- Keep `wechat.governor_enabled` on in production so failed attempts, not only visible messages, count toward the learned send budget.
-- Run the compatibility tests after Hermes or Hermes Web UI upgrades.
-- Treat bridge release tags as the deployment boundary for WeChat runtime behavior.
+## Security and Privacy
 
-## Non-Goals
+This repository does not include:
 
-- A full multi-platform gateway.
-- A Web UI.
-- Real tokens, production configs, private logs, or historical runtime state.
-- A replacement for Hermes Agent.
+- WeChat login state, cookies, QR sessions, or account data.
+- `.env` files, API keys, tokens, or private Hermes home data.
+- Runtime logs, user conversations, generated queues, `node_modules`, or built Web UI bundles.
+
+Use `distribution/config.example.yaml` as a template and keep real credentials outside Git.
 
 ## Documentation
 
-- [Quickstart](docs/quickstart.md)
-- [Protocol](docs/protocol.md)
-- [Service API](docs/service-api.md)
-- [Architecture](docs/architecture.md)
-- [Gateway Flow](docs/gateway-flow.md)
-- [Message Lifecycle](docs/message-lifecycle.md)
-- [Runtime Notifications](docs/runtime-notifications.md)
-- [Hermes Native Integration](docs/hermes-native-integration.md)
-- [Failure Modes](docs/failure-modes.md)
-- [Sync Strategy](docs/sync-strategy.md)
-- [Compatibility Matrix](docs/compatibility-matrix.md)
-- [Migration Map](docs/migration-map.md)
-- [Upgrade Playbook](docs/upgrade-playbook.md)
-- [Configuration](docs/configuration.md)
-- [WeChat Setup](docs/wechat-setup.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Security Model](docs/security-model.md)
-- [Production Checklist](docs/production-checklist.md)
-- [Open Source Launch](docs/open-source-launch.md)
+- `docs/quickstart.md` for bridge-only usage.
+- `docs/hermes-native-integration.md` for patchless native shims.
+- `distribution/docs/install-windows.md` for full distribution install.
+- `distribution/docs/architecture.md` for component boundaries.
+- `distribution/docs/upgrade.md` for replaying patches/overlays on new upstream versions.
+- `distribution/docs/rollback.md` for recovery paths.
 
-## Project Status
+## Release Status
 
-This project is in alpha. The latest published prerelease is `v0.1.0-alpha.3`, with Python package version `0.1.0a3`. The public contract is intentionally small: Hermes client contract, WeChat callback normalization, bridge service API, simulator fixtures, and compatibility tests.
+The project is still alpha. `v0.1.0-alpha.4` is the first release line that treats this repository as both a bridge package and a distribution kit.
 
-Use the alpha to validate the architecture, local simulator, and upgrade boundary. Production adopters should review [Security Model](docs/security-model.md), [Production Checklist](docs/production-checklist.md), and [Release Process](RELEASE.md) before exposing callbacks publicly.
-
-## Community
-
-- Read [Contributing](CONTRIBUTING.md) before opening pull requests.
-- Use [Security](SECURITY.md) for vulnerabilities or accidental secret exposure.
-- See [Roadmap](ROADMAP.md) for planned production hardening.
-- See [Governance](GOVERNANCE.md) for scope and decision rules.
-- See [Support](SUPPORT.md) for where to ask questions.
-
-## License
-
-MIT
-
-
+Before a stable `v0.1.0`, the full distribution must pass a clean-directory install, runtime verification, and rollback test without relying on private local state.

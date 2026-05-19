@@ -1,0 +1,10 @@
+﻿ cron/scheduler.py                             |  76 ++-
+ gateway/platforms/weixin.py                   |   2 +
+ gateway/platforms/weixin_delivery_governor.py | 720 ++++++++++++++++++++++++++
+ gateway/run.py                                | 122 +++--
+ gateway/session.py                            |   6 +-
+ tests/conftest.py                             |  12 +
+ tests/cron/test_scheduler.py                  |  43 +-
+ tests/tools/test_send_message_tool.py         |  45 ++
+ tools/send_message_tool.py                    | 140 ++++-
+ 9 files changed, 1118 insertions(+), 48 deletions(-)

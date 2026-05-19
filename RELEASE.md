@@ -1,4 +1,4 @@
-# Release Process
+﻿# Release Process
 
 Use this process for public releases.
 
@@ -15,7 +15,9 @@ Hermes WeChat Bridge publishes GitHub Releases on every `v*.*.*` tag. Tags that 
 - [ ] `python -m bridge.cli simulate --config examples/minimal/config.yaml --event simulator/sample_events/text.json` passes.
 - [ ] Secret scan shows no real credentials.
 - [ ] `CHANGELOG.md` includes the release notes.
-- [ ] `README.md` quickstart still matches behavior.
+- [ ] README.md quickstart still matches behavior.
+- [ ] distribution/scripts/verify.ps1 passes against an existing Hermes workspace.
+- [ ] Distribution manifest and patch/overlay hashes are current.
 
 ## Tagging
 
@@ -24,8 +26,8 @@ Hermes WeChat Bridge publishes GitHub Releases on every `v*.*.*` tag. Tags that 
 Use prerelease tags while the public contract is still being validated:
 
 ```powershell
-git tag -a v0.1.0-alpha.2 -m "v0.1.0-alpha.2"
-git push origin v0.1.0-alpha.2
+git tag -a v0.1.0-alpha.4 -m "v0.1.0-alpha.4"
+git push origin v0.1.0-alpha.4
 ```
 
 Prerelease tags create GitHub prereleases with wheel and source distribution assets, but they do not publish to PyPI.

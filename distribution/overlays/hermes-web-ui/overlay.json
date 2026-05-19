@@ -1,0 +1,22 @@
+﻿{
+    "schema_version":  1,
+    "name":  "hermes-web-ui-local-overlay",
+    "purpose":  "Replayable local Hermes Web UI enhancements for the Hermes WeChat distribution kit.",
+    "upstream_package":  "hermes-web-ui",
+    "upstream_ref":  "v0.5.28",
+    "upstream_version":  "0.5.28",
+    "local_release":  "0.5.28-local.1",
+    "apply_order":  [
+                        "patches/0001-local-enhancements.patch",
+                        "files/"
+                    ],
+    "validation_gates":  [
+                             "npm test -- tests/client/semantic-message.test.ts tests/shared/chat-protocol.test.ts tests/server/chat-run-message-flush.test.ts tests/client/friendly-notice.test.ts tests/server/friendly-error.test.ts",
+                             "npm run build",
+                             "shadow smoke on an isolated port"
+                         ],
+    "notes":  [
+                  "This directory intentionally contains source changes only, not built Web UI artifacts.",
+                  "Do not commit node_modules, dist bundles, tokens, user state, or local runtime paths."
+              ]
+}
