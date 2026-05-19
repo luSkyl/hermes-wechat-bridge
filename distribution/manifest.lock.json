@@ -21,6 +21,16 @@
                 "path": "patches/hermes-core/0001-wechat-delivery-governor-runtime-integration.patch",
                 "sha256": "accabd08c11d64fd99c28cd36fcdaa1cbf30ae24482f2b77c0fdc18ef4d6d8dd",
                 "description": "Weixin delivery governor and runtime notification integration."
+            },
+            {
+                "path": "patches/hermes-core/0002-friendly-gateway-message-templates.patch",
+                "sha256": "d830609470bbfad142f6ab9a98b03597cc2f1ae014b4e0771876af6a7d68e056",
+                "description": "Persona-aware friendly gateway templates for greetings, cron/background results, approval prompts, unknown commands, and platform notifications."
+            },
+            {
+                "path": "patches/hermes-core/0003-local-profile-vault-guard.patch",
+                "sha256": "b83599c2bca58fd64172087d3d2d95426e9c8630702139ab73712e96d646751e",
+                "description": "Protected local Hermes profile backup guard for update, profile distribution, and uninstall flows."
             }
         ]
     },

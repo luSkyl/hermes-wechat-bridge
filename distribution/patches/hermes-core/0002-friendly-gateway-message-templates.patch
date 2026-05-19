@@ -1,0 +1,2665 @@
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index ca7f9c859..3385f1fa8 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -38,6 +38,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
+ from hermes_constants import get_hermes_home
+ from hermes_cli.config import load_config, _expand_env_vars
+ from hermes_time import now as _hermes_now
++from gateway.friendly_messages import (
++    render_cron_failure,
++    render_cron_result,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -132,70 +136,14 @@ SILENT_MARKER = "[SILENT]"
+ # Backward-compatible module override used by tests and emergency monkeypatches.
+ _hermes_home: Path | None = None
+ 
+-_RAW_USER_VISIBLE_ERROR_MARKERS = (
+-    "traceback",
+-    "runtimeerror",
+-    "httperror",
+-    "http 5",
+-    "http 429",
+-    "ret=-2",
+-    "errcode=-2",
+-)
+-
+-
+ def _get_hermes_home() -> Path:
+     """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
+     return _hermes_home or get_hermes_home()
+ 
+ 
+-def _friendly_card(
+-    title: str,
+-    *,
+-    action: str,
+-    result: str,
+-    impact: str,
+-    boundary: str,
+-    next_step: str,
+-) -> str:
+-    lines = [
+-        title,
+-        "",
+-        "【状态】",
+-        f"动作｜{_sanitize_user_visible(action)}",
+-        f"结果｜{_sanitize_user_visible(result)}",
+-        f"影响｜{_sanitize_user_visible(impact)}",
+-        f"边界｜{_sanitize_user_visible(boundary)}",
+-        "",
+-        "【下一步】",
+-        _sanitize_user_visible(next_step),
+-    ]
+-    return "\n".join(lines)
+-
+-
+-def _sanitize_user_visible(text: str) -> str:
+-    value = str(text or "")
+-    lowered = value.lower()
+-    if any(marker in lowered for marker in _RAW_USER_VISIBLE_ERROR_MARKERS):
+-        return "任务运行或上游服务暂时不可用；原始技术细节已写入本地任务输出。"
+-    return value
+-
+-
+ def _format_cron_failure_card(job: dict, error: str | None) -> str:
+     job_name = str(job.get("name") or job.get("id") or "未命名任务")
+-    error_text = str(error or "任务未返回可展示结果")
+-    safe_result = "任务没有完成，已停止继续重试。"
+-    if "blocked" in error_text.lower() or "injection" in error_text.lower():
+-        safe_result = "任务触发安全保护，已停止执行。"
+-    elif "timeout" in error_text.lower() or "timed out" in error_text.lower():
+-        safe_result = "任务执行超时，已保留现场。"
+-    return _friendly_card(
+-        f"⚠️ 定时任务未完成｜{job_name}",
+-        action="已记录失败并停止本轮自动补发",
+-        result=safe_result,
+-        impact="不会把原始异常直接发到聊天里，也不会因为告警刷屏延长限流。",
+-        boundary="详细堆栈、HTTP 状态和命令输出只保存在本地输出文件。",
+-        next_step="我会在下一次调度周期重新执行；如果连续失败，请打开本地任务输出查看详情。",
+-    )
++    return render_cron_failure(job_name, error)
+ 
+ 
+ def _get_lock_paths() -> tuple[Path, Path]:
+@@ -580,14 +528,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+ 
+     if wrap_response:
+         task_name = job.get("name", job["id"])
+-        job_id = job.get("id", "")
+-        delivery_content = (
+-            f"Cronjob Response: {task_name}\n"
+-            f"(job_id: {job_id})\n"
+-            f"-------------\n\n"
+-            f"{content}\n\n"
+-            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+-        )
++        delivery_content = render_cron_result(str(task_name), content)
+     else:
+         delivery_content = content
+ 
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+new file mode 100644
+index 000000000..dc4801d52
+--- /dev/null
++++ b/gateway/friendly_messages.py
+@@ -0,0 +1,877 @@
++"""Friendly user-facing message contracts for gateway system notices.
++
++This module is intentionally small and dependency-light: gateway/runtime code can
++call it from hot paths without pulling platform SDKs into the import graph.  It
++keeps Hermes-owned system notices in one message contract instead of scattering
++raw strings across adapters.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import re
++import unicodedata
++from dataclasses import dataclass, field
++from typing import Any, Iterable, Literal, Mapping, Sequence
++
++
++ApprovalDecision = Literal["once", "session", "always", "deny"]
++
++PLAIN_TABLE_DIVIDER = "────────────────────────────────────────"
++
++
++RAW_ERROR_MARKERS = (
++    "traceback",
++    "runtimeerror",
++    "httperror",
++    "http 5",
++    "http 429",
++    "ret=-2",
++    "errcode=-2",
++    "last_status=",
++    "same_tool_fail",
++)
++
++INTERNAL_ACTIVITY_MARKERS = (
++    "receiving stream response",
++    "iteration",
++    "api_call_count",
++    "max_iterations",
++    "current_tool",
++)
++
++
++@dataclass(frozen=True)
++class FriendlyPersona:
++    """External identity used in user-facing friendly messages."""
++
++    display_name: str = "Hermes"
++    product_name: str = "Hermes"
++    role_name: str = "随身执行伙伴"
++    greeting: str = "我是「{display_name}」，你的随身执行伙伴 😊～"
++    signature: str = "{display_name}"
++    powered_by: str = "Hermes"
++    show_powered_by: bool = False
++    tone: str = "warm_friendly"
++
++    def format(self, template: str) -> str:
++        values = {
++            "display_name": self.display_name,
++            "product_name": self.product_name,
++            "role_name": self.role_name,
++            "signature": self.signature.format(display_name=self.display_name, product_name=self.product_name),
++            "powered_by": self.powered_by,
++        }
++        try:
++            return str(template).format(**values)
++        except Exception:
++            return str(template)
++
++    def greeting_text(self) -> str:
++        return self.format(self.greeting)
++
++
++def get_persona(config: Mapping[str, Any] | None = None) -> FriendlyPersona:
++    cfg = _load_friendly_config() if config is None else config
++    persona_cfg = _persona_config(cfg)
++    env_name = os.getenv("HERMES_FRIENDLY_DISPLAY_NAME") or os.getenv("HERMES_DISPLAY_NAME")
++    display_name = _first_text(
++        env_name,
++        persona_cfg.get("display_name"),
++        persona_cfg.get("name"),
++        _mapping_get(cfg, "display_name"),
++        "Hermes",
++    )
++    product_name = _first_text(persona_cfg.get("product_name"), "Hermes")
++    role_name = _first_text(persona_cfg.get("role_name"), "随身执行伙伴")
++    greeting = _first_text(
++        persona_cfg.get("greeting"),
++        "我是「{display_name}」，你的随身执行伙伴 😊～",
++    )
++    signature = _first_text(persona_cfg.get("signature"), "{display_name}")
++    powered_by = _first_text(persona_cfg.get("powered_by"), product_name)
++    tone = _first_text(persona_cfg.get("tone"), "warm_friendly")
++    return FriendlyPersona(
++        display_name=display_name,
++        product_name=product_name,
++        role_name=role_name,
++        greeting=greeting,
++        signature=signature,
++        powered_by=powered_by,
++        show_powered_by=_coerce_bool(persona_cfg.get("show_powered_by"), False),
++        tone=tone,
++    )
++
++
++def render_welcome(config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    lines = [
++        persona.greeting_text(),
++        "",
++        "你可以让我查资料、改代码、管文件、跑定时任务，也可以把微信、飞书、网页和本地工作串起来 ✨",
++        "",
++        "有什么要处理的，直接告诉我就行～",
++    ]
++    if persona.show_powered_by:
++        lines.extend(["", f"由 {persona.powered_by} 驱动"])
++    return "\n".join(lines)
++
++
++def render_greeting(config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    return "\n".join(
++        [
++            f"我在，{persona.display_name}在线 😊～",
++            "",
++            "有什么要处理的，直接告诉我就行 ✨",
++        ]
++    )
++
++
++def render_ack(config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    return f"收到，{persona.display_name}来处理 😊"
++
++
++def render_starting(action: str = "先看一下当前状态", config: Mapping[str, Any] | None = None) -> str:
++    get_persona(config)
++    return f"我来处理，{_sanitize_user_visible(action)} 🔎"
++
++
++def render_simple_done(next_step: str | None = None) -> str:
++    lines = ["处理好了 🌿"]
++    if next_step:
++        lines.extend(["", _sanitize_user_visible(next_step)])
++    else:
++        lines.extend(["", "你可以继续说下一步要做什么 ✨"])
++    return "\n".join(lines)
++
++
++def render_simple_failure(reason: str | None = None) -> str:
++    lines = ["这轮没跑完 ⚠️", "", "我已经把细节留在本地记录里，不会在微信里堆报错。"]
++    if reason:
++        lines.extend(["", f"原因｜{_sanitize_user_visible(reason)}"])
++    lines.extend(["", "你可以让我重试，或调整目标后再跑一次 ✨"])
++    return "\n".join(lines)
++
++
++def render_capabilities(config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    lines = [
++        f"我是「{persona.display_name}」，我可以帮你做这些 😊～",
++        "",
++        "• 🔎 查天气、搜资料、整理信息",
++        "• 💻 写代码、排查问题、修改项目",
++        "• 📁 读文件、写文档、整理资料",
++        "• 🌐 浏览网页、提取重点",
++        "• ⏰ 设置提醒、执行定时任务",
++        "• 💬 处理微信、飞书等消息通知",
++        "• 🧠 记住你的偏好，跨场景接着做事",
++        "",
++        "你可以直接说目标，不用按固定格式提问 ✨",
++    ]
++    if persona.show_powered_by:
++        lines.extend(["", f"由 {persona.powered_by} 驱动"])
++    return "\n".join(lines)
++
++
++def render_persona_reply(text: str, config: Mapping[str, Any] | None = None) -> str | None:
++    normalized = _normalize_persona_query(text)
++    persona = get_persona(config)
++    greeting_queries = {
++        "你好",
++        "您好",
++        "hi",
++        "hello",
++        "hey",
++        "哈喽",
++        "哈啰",
++        "在吗",
++        "在不在",
++        "你在吗",
++        "有人吗",
++        "我来了",
++        persona.display_name.lower(),
++    }
++    identity_queries = {
++        "你是谁",
++        "你是谁呀",
++        "你是谁啊",
++        "你叫什么",
++        "你叫啥",
++        "介绍一下自己",
++        "自我介绍",
++        "你是什么",
++    }
++    capability_queries = {
++        "你能干嘛",
++        "你能干什么",
++        "你能做什么",
++        "你会什么",
++        "你有什么能力",
++        "你有什么功能",
++        "能干嘛",
++        "能做什么",
++    }
++    if normalized in greeting_queries:
++        return render_greeting(config)
++    if normalized in identity_queries:
++        return render_welcome(config)
++    if normalized in capability_queries:
++        return render_capabilities(config)
++    return None
++
++
++def render_digest_report(
++    title: str,
++    *,
++    headline: str | None = None,
++    sections: Sequence[Mapping[str, Any]] | None = None,
++    next_step: str | None = None,
++) -> str:
++    lines = [_sanitize_user_visible(title).strip()]
++    if headline:
++        lines.extend(["", _sanitize_user_visible(headline).strip()])
++    for section in sections or ():
++        rendered = _render_digest_section(section)
++        if rendered:
++            lines.extend(["", rendered])
++    if next_step:
++        lines.extend(["", "🧭 下一步", _sanitize_user_visible(next_step).strip()])
++    return "\n".join(line.rstrip() for line in lines if line is not None).strip()
++
++
++def render_plain_table(
++    headers: Sequence[Any],
++    rows: Sequence[Sequence[Any]],
++    *,
++    divider: str = PLAIN_TABLE_DIVIDER,
++) -> str:
++    columns = [str(header or "") for header in headers]
++    table_rows = [[str(cell or "") for cell in row] for row in rows]
++    widths: list[int] = []
++    for index, header in enumerate(columns):
++        values = [header]
++        values.extend(row[index] if index < len(row) else "" for row in table_rows)
++        widths.append(max(_display_width(value) for value in values))
++    rendered = [_format_table_row(columns, widths), divider]
++    rendered.extend(_format_table_row(row, widths) for row in table_rows)
++    rendered.append(divider)
++    return "\n".join(rendered)
++
++
++def render_pairing_code(platform_name: str, code: str) -> str:
++    return friendly_card(
++        "🧭 需要完成配对｜我还不认识这个账号",
++        action="已生成一次性配对码",
++        result=f"配对码｜{code}",
++        impact="通过前不会处理这个账号发来的指令",
++        boundary=f"只用于 {platform_name or '当前平台'} 当前账号的授权绑定",
++        next_step=f"请让管理员运行：hermes pairing approve {platform_name} {code}",
++    )
++
++
++def render_pairing_rate_limited() -> str:
++    return friendly_card(
++        "⚠️ 配对请求过于频繁｜请稍后再试",
++        action="已暂时停止生成新的配对码",
++        result="本次请求没有创建新授权",
++        impact="避免陌生账号反复触发提醒",
++        boundary="只影响当前配对入口，已授权用户不受影响",
++        next_step="请稍等一会儿再发送消息。",
++    )
++
++
++def render_unknown_command(command: str) -> str:
++    command = str(command or "").strip().lstrip("/") or "unknown"
++    return friendly_card(
++        f"🧭 没找到这个命令｜/{command}",
++        action="已拦截未知斜杠命令",
++        result="没有把它当作普通聊天交给模型处理",
++        impact="避免误触发不存在的工具或流程",
++        boundary="只检查当前网关已注册的命令和技能",
++        next_step="发送 /commands 查看可用命令；如果想当普通消息发送，请去掉开头的 /。",
++    )
++
++
++def render_telegram_topic_root_lobby() -> str:
++    return friendly_card(
++        "🧭 这里是 Telegram 主入口｜当前只处理系统命令",
++        action="已保留主入口用于管理命令",
++        result="没有在这里开启新的对话会话",
++        impact="避免多个并行会话混在同一个主聊天里",
++        boundary="每个话题会作为独立 Hermes 会话运行",
++        next_step="请打开顶部的 All Messages 话题并发送任意消息，Telegram 会为你创建新的独立话题。",
++    )
++
++
++def render_telegram_topic_root_new() -> str:
++    return friendly_card(
++        "🧭 请从 All Messages 开启并行会话",
++        action="没有在主入口直接创建并行会话",
++        result="当前主入口仍只保留系统命令能力",
++        impact="避免误替换或混淆已有话题会话",
++        boundary="/new 在已有话题内只会重置当前话题",
++        next_step="请打开顶部的 All Messages 话题并发送任意消息来创建新的并行会话。",
++    )
++
++
++def render_telegram_topic_new_header() -> str:
++    return (
++        "🌿 已在当前话题开启新会话\n\n"
++        "提示｜如果要并行处理另一件事，请打开 All Messages 并发送新消息；每个话题都是独立会话。"
++    )
++
++
++@dataclass(frozen=True)
++class FriendlyCard:
++    """Canonical text-card contract used by gateway system notices."""
++
++    title: str
++    action: str
++    result: str
++    impact: str
++    boundary: str
++    next_step: str
++    extra_status: tuple[str, ...] = field(default_factory=tuple)
++    next_heading: str = "【下一步】"
++
++    def render(self) -> str:
++        lines = [
++            _sanitize_user_visible(self.title),
++            "",
++            "【状态】",
++            f"动作｜{_sanitize_user_visible(self.action)}",
++            f"结果｜{_sanitize_user_visible(self.result)}",
++            f"影响｜{_sanitize_user_visible(self.impact)}",
++            f"边界｜{_sanitize_user_visible(self.boundary)}",
++        ]
++        lines.extend(_sanitize_user_visible(line) for line in self.extra_status if line)
++        lines.extend(["", self.next_heading, _sanitize_user_visible(self.next_step)])
++        return "\n".join(lines)
++
++
++def friendly_card(
++    title: str,
++    *,
++    action: str,
++    result: str,
++    impact: str,
++    boundary: str,
++    next_step: str,
++    extra_status: Iterable[str] | None = None,
++    next_heading: str = "【下一步】",
++) -> str:
++    return FriendlyCard(
++        title=title,
++        action=action,
++        result=result,
++        impact=impact,
++        boundary=boundary,
++        next_step=next_step,
++        extra_status=tuple(extra_status or ()),
++        next_heading=next_heading,
++    ).render()
++
++
++def render_cron_result(job_name: str, content: str) -> str:
++    return friendly_card(
++        f"🌿 定时任务已完成｜{job_name}",
++        action="已完成本轮自动执行并发送结果",
++        result=_compact_message_preview(content),
++        impact="这是定时任务结果，不会附带内部任务编号或英文管理说明",
++        boundary="完整输出已保存在本地任务记录；聊天里只保留可读摘要",
++        next_step="如果需要调整、暂停或删除任务，直接告诉我你的操作意图就行～ ✨",
++    )
++
++
++def render_cron_failure(job_name: str, error: str | None) -> str:
++    error_text = str(error or "任务未返回可展示结果")
++    safe_result = "任务没有完成，已停止继续重试。"
++    if "blocked" in error_text.lower() or "injection" in error_text.lower():
++        safe_result = "任务触发安全保护，已停止执行。"
++    elif "timeout" in error_text.lower() or "timed out" in error_text.lower():
++        safe_result = "任务执行超时，已保留现场。"
++    return friendly_card(
++        f"⚠️ 这轮任务没跑完｜{job_name}",
++        action="已记录失败并停止本轮自动补发",
++        result=safe_result,
++        impact="不会把原始异常直接发到聊天里，也不会因为告警刷屏延长限流",
++        boundary="详细堆栈、HTTP 状态和命令输出只保存在本地输出文件",
++        next_step="我会在下一次调度周期重新执行；如果连续失败，你可以让我查看最近一次输出。",
++    )
++
++
++def render_background_result(prompt: str, content: str | None) -> str:
++    return friendly_card(
++        "🌿 后台任务已完成",
++        action="已完成这次后台执行",
++        result=_compact_message_preview(content or "没有返回可展示内容。"),
++        impact="不会打断当前会话，也不会重复发送内部执行细节",
++        boundary="完整过程保存在本地记录；聊天里只保留可读结果",
++        next_step="如果要继续处理这个结果，直接接着说你的下一步要求就行～ ✨",
++        extra_status=(f"任务｜{command_preview(prompt, 120)}",) if str(prompt or "").strip() else (),
++    )
++
++
++def render_background_failure(task_id: str, error: str | None) -> str:
++    return friendly_card(
++        f"⚠️ 后台任务没跑完｜{task_id or '未命名任务'}",
++        action="已停止这次后台执行",
++        result=_sanitize_user_visible(error or "任务暂时没有完成"),
++        impact="不会继续刷屏，也不会把原始堆栈反复发到聊天里",
++        boundary="详细错误只保存在本地日志和任务记录",
++        next_step="你可以让我重试，或调整任务目标后重新发起 ✨",
++    )
++
++
++def render_update_result(success: bool, output: str | None = None, exit_code: int | None = None) -> str:
++    if success:
++        return friendly_card(
++            "🌿 Hermes 更新已完成",
++            action="已完成更新流程",
++            result=_compact_message_preview(output or "更新成功，当前服务会继续恢复运行。"),
++            impact="后续消息会使用更新后的运行时处理",
++            boundary="完整更新输出保存在本地日志；聊天里只保留摘要",
++            next_step="你可以继续发消息，我会按新的运行时接着处理 ✨",
++        )
++    code_text = f"退出码 {exit_code}" if exit_code is not None else "更新流程返回失败"
++    return friendly_card(
++        "⚠️ Hermes 更新没完成",
++        action="已停止本轮更新流程",
++        result=_sanitize_user_visible(output or code_text),
++        impact="当前服务会继续使用更新前的可用状态",
++        boundary="详细输出已保存在本地日志，不会把原始堆栈直接发到聊天里",
++        next_step="可以稍后重试，或运行 hermes update 查看本地详情。",
++    )
++
++
++def _compact_message_preview(content: str, limit: int = 1200) -> str:
++    rendered = str(content or "").strip()
++    if not rendered:
++        return "任务已完成，但没有返回可展示内容。"
++    if len(rendered) <= limit:
++        return rendered
++    return rendered[: max(0, limit - 3)].rstrip() + "..."
++
++
++def _load_friendly_config() -> Mapping[str, Any]:
++    try:
++        from hermes_cli.config import load_config
++
++        cfg = load_config()
++        return cfg if isinstance(cfg, Mapping) else {}
++    except Exception:
++        return {}
++
++
++def _persona_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
++    friendly = _mapping_get(config, "friendly")
++    if isinstance(friendly, Mapping):
++        persona = _mapping_get(friendly, "persona")
++        if isinstance(persona, Mapping):
++            return persona
++    persona = _mapping_get(config, "persona")
++    if isinstance(persona, Mapping):
++        return persona
++    return {}
++
++
++def _mapping_get(config: Mapping[str, Any] | None, key: str) -> Any:
++    if isinstance(config, Mapping):
++        return config.get(key)
++    return None
++
++
++def _first_text(*values: Any) -> str:
++    for value in values:
++        if value is None:
++            continue
++        text = str(value).strip()
++        if text:
++            return text
++    return ""
++
++
++def _coerce_bool(value: Any, default: bool) -> bool:
++    if value is None:
++        return default
++    if isinstance(value, bool):
++        return value
++    if isinstance(value, (int, float)):
++        return bool(value)
++    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
++
++
++def _normalize_persona_query(text: str) -> str:
++    normalized = str(text or "").strip().lower()
++    normalized = re.sub(r"^[`'\"“”‘’\s]+|[`'\"“”‘’\s]+$", "", normalized)
++    normalized = re.sub(r"[？?。.!！～~\s]+$", "", normalized)
++    normalized = re.sub(r"\s+", "", normalized)
++    return normalized
++
++
++def _render_digest_section(section: Mapping[str, Any]) -> str:
++    title = _first_text(section.get("title"))
++    lines = [title] if title else []
++    headers = section.get("headers")
++    rows = section.get("rows")
++    if isinstance(headers, Sequence) and not isinstance(headers, (str, bytes)):
++        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
++            row_values = [row for row in rows if isinstance(row, Sequence) and not isinstance(row, (str, bytes))]
++            if row_values:
++                lines.extend(["", render_plain_table(headers, row_values)] if lines else [render_plain_table(headers, row_values)])
++    bullets = section.get("bullets")
++    if isinstance(bullets, Sequence) and not isinstance(bullets, (str, bytes)):
++        rendered_bullets = [f"• {_sanitize_user_visible(item)}" for item in bullets if str(item or "").strip()]
++        if rendered_bullets:
++            if lines:
++                lines.append("")
++            lines.extend(rendered_bullets)
++    body = _first_text(section.get("body"))
++    if body:
++        if lines:
++            lines.append("")
++        lines.append(_sanitize_user_visible(body))
++    return "\n".join(lines).strip()
++
++
++def _display_width(value: Any) -> int:
++    width = 0
++    for char in str(value or ""):
++        if unicodedata.combining(char):
++            continue
++        width += 2 if unicodedata.east_asian_width(char) in {"F", "W"} else 1
++    return width
++
++
++def _pad_display(value: Any, width: int) -> str:
++    text = str(value or "")
++    return text + " " * max(0, width - _display_width(text))
++
++
++def _format_table_row(row: Sequence[Any], widths: Sequence[int]) -> str:
++    cells = []
++    for index, width in enumerate(widths):
++        cell = row[index] if index < len(row) else ""
++        cells.append(_pad_display(cell, width))
++    return "    ".join(cells).rstrip()
++
++
++def _sanitize_user_visible(text: Any) -> str:
++    rendered = str(text or "")
++    lowered = rendered.lower()
++    if any(marker in lowered for marker in RAW_ERROR_MARKERS):
++        return "内部技术细节已转入本地诊断记录，这里只保留可操作信息。"
++    for marker in INTERNAL_ACTIVITY_MARKERS:
++        if marker in lowered:
++            return _public_activity_label({"last_activity_desc": rendered})
++    return rendered
++
++
++def command_preview(command: str, limit: int = 1800) -> str:
++    command = str(command or "").strip()
++    if len(command) <= limit:
++        return command
++    return command[: max(0, limit - 3)].rstrip() + "..."
++
++
++def approval_id(session_key: str, command: str) -> str:
++    digest = hashlib.sha1(f"{session_key}\n{command}".encode("utf-8", "replace")).hexdigest()
++    return f"gw-{digest[:12]}"
++
++
++def approval_summary(command: str, session_key: str, description: str) -> dict[str, str]:
++    return {
++        "title": "🧯 命令需要审批",
++        "risk_pill": "高风险",
++        "risk": describe_approval_risk(description, command),
++        "scope": infer_approval_scope(command, description),
++        "command": command_preview(command),
++        "approval_id": approval_id(session_key, command),
++    }
++
++
++def render_approval_request(command: str, session_key: str, description: str = "dangerous command") -> str:
++    summary = approval_summary(command, session_key, description)
++    return "\n".join(
++        [
++            f"{summary['title']}｜{summary['risk_pill']}",
++            "",
++            "我已暂停执行。确认前，这条命令不会运行。",
++            "",
++            "【判断信息】",
++            f"风险｜{summary['risk']}",
++            f"范围｜{summary['scope']}",
++            "命令｜",
++            "```",
++            summary["command"],
++            "```",
++            f"审批 ID｜{summary['approval_id']}",
++            "",
++            "【可选操作】",
++            "01｜批准本次",
++            "02｜本会话允许",
++            "03｜永久允许",
++            "04｜拒绝",
++            "",
++            "【下一步】",
++            "直接回复序号或文字：批准本次 / 本会话允许 / 永久允许 / 拒绝。",
++        ]
++    )
++
++
++def render_approval_resolved(choice: ApprovalDecision, count: int = 1) -> str:
++    if choice == "deny":
++        return render_approval_denied(count)
++    mode = {
++        "once": "本次允许",
++        "session": "本会话允许",
++        "always": "永久允许",
++    }.get(choice, "本次允许")
++    return friendly_card(
++        f"🌿 命令已批准｜{mode}",
++        action="已放行等待中的命令",
++        result="代理正在恢复执行",
++        impact="只继续这次已确认的操作，不会额外启动新任务",
++        boundary=(
++            f"本次共处理 {count} 条待审批命令"
++            if count > 1 else "仅处理当前这条待审批命令"
++        ),
++        next_step="请继续等待后续执行结果。",
++    )
++
++
++def render_approval_denied(count: int = 1) -> str:
++    return friendly_card(
++        "🧯 命令已拒绝｜不会执行",
++        action="已取消等待中的危险命令",
++        result="代理会收到拒绝结果并继续收口当前任务",
++        impact="不会运行你刚刚拒绝的命令",
++        boundary=(
++            f"本次共拒绝 {count} 条待审批命令"
++            if count > 1 else "仅拒绝当前这条待审批命令"
++        ),
++        next_step="你可以调整需求后重试，或发送 /reset 取消当前会话。",
++    )
++
++
++def render_no_pending_approval(action: str = "approve") -> str:
++    verb = "批准" if action == "approve" else "拒绝"
++    return friendly_card(
++        f"ℹ️ 当前没有待{verb}的命令",
++        action="没有发现正在等待的审批请求",
++        result="无需处理，当前会话状态保持不变",
++        impact="不会执行或取消任何命令",
++        boundary="只检查当前聊天对应的会话",
++        next_step="如果刚才的审批已过期，请让代理重新尝试该操作。",
++    )
++
++
++def describe_approval_risk(description: str, command: str = "") -> str:
++    desc = (description or "").strip().lower()
++    command_l = (command or "").lower()
++    mappings = [
++        (("recursive delete", "find -delete", "find -exec"), "删除文件或目录，可能造成不可恢复的数据丢失"),
++        (("delete in root path",), "删除根路径内容，风险极高"),
++        (("script execution via -e/-c flag", "script execution via heredoc"), "执行临时代码片段，需要你确认风险"),
++        (("shell command via -c/-lc flag",), "通过 shell 执行拼接命令，需要你确认风险"),
++        (("pipe remote content to shell", "execute remote script",), "下载并执行远程内容，存在供应链风险"),
++        (("sudo", "privilege",), "涉及提权或敏感权限，需要人工确认"),
++        (("git reset --hard", "git clean", "git branch force delete"), "可能删除或覆盖未提交改动"),
++        (("git force push",), "会改写远端历史，可能影响协作者"),
++        (("system service", "hermes gateway", "hermes update"), "会影响正在运行的系统或网关服务"),
++        (("sql drop", "sql delete", "sql truncate"), "会修改或删除数据库数据"),
++        (("format filesystem", "disk copy", "block device"), "会影响磁盘或文件系统"),
++        (("chmod", "chown", "permissions"), "会修改权限或所有者，可能扩大访问范围"),
++    ]
++    for needles, label in mappings:
++        if any(needle in desc for needle in needles):
++            return label
++    if re.search(r"\brm\b", command_l):
++        return "删除操作，需要确认影响范围"
++    if re.search(r"\b(python|python3|node|ruby|perl)\b", command_l):
++        return "执行脚本代码，需要确认风险"
++    return "命令可能影响本机环境，需要人工确认"
++
++
++def infer_approval_scope(command: str, description: str = "") -> str:
++    command = str(command or "")
++    desc = str(description or "").lower()
++    if any(token in desc for token in ("system", "root path", "filesystem", "block device")):
++        return "系统或磁盘级资源"
++    if re.search(r"(^|\s)([A-Za-z]:\\|/)(?!tmp\b|var/tmp\b)", command):
++        return "本机绝对路径"
++    if re.search(r"(^|\s)(\./|\.\\|\.\.|\*|\?)", command):
++        return "当前工作区相对路径"
++    if any(token in desc for token in ("git", "project", "env/config")):
++        return "当前项目或版本库"
++    if "sql" in desc:
++        return "数据库数据"
++    return "当前执行环境"
++
++
++_CHOICE_ALIASES: dict[str, ApprovalDecision] = {
++    "1": "once",
++    "01": "once",
++    "批准本次": "once",
++    "本次批准": "once",
++    "允许本次": "once",
++    "仅此一次": "once",
++    "approve once": "once",
++    "allow once": "once",
++    "once": "once",
++    "2": "session",
++    "02": "session",
++    "本会话允许": "session",
++    "会话允许": "session",
++    "本次会话允许": "session",
++    "approve session": "session",
++    "allow session": "session",
++    "session": "session",
++    "3": "always",
++    "03": "always",
++    "永久允许": "always",
++    "一直允许": "always",
++    "总是允许": "always",
++    "approve always": "always",
++    "always approve": "always",
++    "always allow": "always",
++    "always": "always",
++    "4": "deny",
++    "04": "deny",
++    "拒绝": "deny",
++    "不允许": "deny",
++    "取消": "deny",
++    "deny": "deny",
++    "cancel": "deny",
++}
++
++
++def parse_approval_reply(text: str) -> ApprovalDecision | None:
++    """Parse explicit friendly approval replies.
++
++    Deliberately does *not* accept bare yes/ok to avoid accidental execution.
++    """
++
++    raw = str(text or "").strip()
++    if not raw or raw.startswith("/"):
++        return None
++    normalized = raw.lower()
++    normalized = normalized.replace("｜", " ").replace("|", " ")
++    normalized = re.sub(r"^[`'\"\s]+|[`'\"\s]+$", "", normalized)
++    normalized = re.sub(r"^[（(\[]?\s*(0?[1-4])\s*[）)\].、.．:：\-—_\s]*", r"\1 ", normalized)
++    normalized = re.sub(r"\s+", " ", normalized).strip(" 。.!！")
++    if normalized in _CHOICE_ALIASES:
++        return _CHOICE_ALIASES[normalized]
++    first = normalized.split(" ", 1)[0]
++    return _CHOICE_ALIASES.get(first)
++
++
++def _public_activity_label(summary: dict[str, Any]) -> str:
++    current_tool = str(summary.get("current_tool") or "").strip().lower()
++    last_desc = str(summary.get("last_activity_desc") or "").strip().lower()
++    text = f"{current_tool} {last_desc}"
++    if "receiving stream" in text or "stream response" in text:
++        return "正在等待模型输出"
++    if any(token in current_tool for token in ("search", "grep", "rg", "find")):
++        return "正在检索资料"
++    if any(token in current_tool for token in ("terminal", "shell", "command", "execute")):
++        return "正在执行命令"
++    if current_tool:
++        return "正在执行工具步骤"
++    if "starting" in text:
++        return "正在启动任务"
++    if "tool" in text:
++        return "正在等待工具返回"
++    return "仍在处理当前任务"
++
++
++def public_activity_extra_status(
++    summary: dict[str, Any] | None,
++    *,
++    elapsed_mins: int | None = None,
++    label: str = "进展",
++) -> tuple[str, ...]:
++    parts: list[str] = []
++    if elapsed_mins is not None and elapsed_mins > 0:
++        parts.append(f"已运行约 {elapsed_mins} 分钟")
++    if summary:
++        parts.append(_public_activity_label(summary))
++    if not parts:
++        return ()
++    return (f"{label}｜{'；'.join(parts)}",)
++
++
++def render_task_progress(elapsed_mins: int, activity_summary: dict[str, Any] | None = None) -> str:
++    return friendly_card(
++        f"⏳ 任务仍在处理中｜已运行约 {elapsed_mins} 分钟",
++        action="继续等待后台任务",
++        result="尚未完成，但仍有活动迹象",
++        impact="不会重复刷屏，只保留这一次进度提示",
++        boundary="如果后续无活动，会进入超时保护",
++        next_step="你可以继续等待，或发送 /reset 取消当前会话。",
++        extra_status=public_activity_extra_status(activity_summary),
++    )
++
++
++def render_inactivity_warning(elapsed_mins: int, remaining_mins: int) -> str:
++    return friendly_card(
++        f"⚠️ 会话活动变慢｜约 {elapsed_mins} 分钟没有新进展",
++        action="已启动超时保护观察",
++        result=f"如果仍无活动，约 {remaining_mins} 分钟后会自动停止",
++        impact="避免后台任务无限占用会话",
++        boundary="不会重复发送原始错误或内部堆栈",
++        next_step="你可以继续等待，或发送 /reset 立即重置。",
++    )
++
++
++def render_inactivity_timeout(timeout_mins: int, activity_summary: dict[str, Any] | None = None) -> str:
++    return friendly_card(
++        f"⏱️ 任务已自动暂停｜超过 {timeout_mins} 分钟无新活动",
++        action="已停止当前后台执行",
++        result="本次任务未完成，当前会话已回到可操作状态",
++        impact="避免任务无限占用会话；不会展示内部堆栈或原始错误",
++        boundary="详细诊断只保存在本地日志，聊天里只保留可操作信息",
++        next_step="你可以重试刚才的请求，或发送 /reset 开始新的会话。",
++        extra_status=public_activity_extra_status(activity_summary),
++    )
++
++
++def render_busy_ack(
++    mode: Literal["steer", "queue", "interrupt"],
++    activity_summary: dict[str, Any] | None = None,
++    *,
++    elapsed_mins: int | None = None,
++) -> str:
++    extra = public_activity_extra_status(activity_summary, elapsed_mins=elapsed_mins)
++    if mode == "steer":
++        return friendly_card(
++            "⏩ 已接入当前任务｜消息会在下一次工具调用后生效",
++            action="已尝试追加到当前运行",
++            result="当前任务继续执行",
++            impact="不会开启第二个并发任务",
++            boundary="如果工具调用长期无返回，仍会进入超时保护",
++            next_step="请等待当前任务继续输出。",
++            extra_status=extra,
++        )
++    if mode == "queue":
++        return friendly_card(
++            "⏳ 已排到下一轮｜当前任务完成后处理",
++            action="已保存你的后续消息",
++            result="当前任务完成后会自动继续",
++            impact="不会打断正在执行的任务",
++            boundary="短时间多条消息会合并，避免刷屏",
++            next_step="请等待当前任务结束，我会继续处理。",
++            extra_status=extra,
++        )
++    return friendly_card(
++        "⚡ 正在切换到你的新消息｜当前任务会被中断",
++        action="已请求中断当前任务",
++        result="会尽快处理你的新消息",
++        impact="当前任务可能不会继续输出",
++        boundary="只发送一次中断确认",
++        next_step="请稍等，我会回复新的请求。",
++        extra_status=extra,
++    )
+diff --git a/gateway/platforms/discord.py b/gateway/platforms/discord.py
+index a3904630f..324ea4998 100644
+--- a/gateway/platforms/discord.py
++++ b/gateway/platforms/discord.py
+@@ -65,6 +65,7 @@ from gateway.platforms.base import (
+     cache_document_from_bytes,
+     SUPPORTED_DOCUMENT_TYPES,
+ )
++from gateway.friendly_messages import approval_summary, command_preview
+ from tools.url_safety import is_safe_url
+ 
+ 
+@@ -3974,15 +3975,17 @@ class DiscordAdapter(BasePlatformAdapter):
+             if not channel:
+                 channel = await self._client.fetch_channel(int(target_id))
+ 
+-            # Discord embed description limit is 4096; show full command up to that
+-            max_desc = 4088
+-            cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
++            summary = approval_summary(command, session_key, description)
++            cmd_display = command_preview(command, 1000)
+             embed = discord.Embed(
+-                title="⚠️ Command Approval Required",
+-                description=f"```\n{cmd_display}\n```",
++                title=f"🧯 命令需要审批｜{summary['risk_pill']}",
++                description="我已暂停执行。确认前，这条命令不会运行。",
+                 color=discord.Color.orange(),
+             )
+-            embed.add_field(name="Reason", value=description, inline=False)
++            embed.add_field(name="⚠️ 风险", value=summary["risk"], inline=False)
++            embed.add_field(name="📍 范围", value=summary["scope"], inline=False)
++            embed.add_field(name="💻 命令", value=f"```\n{cmd_display}\n```", inline=False)
++            embed.add_field(name="🔖 审批 ID", value=f"`{summary['approval_id']}`", inline=False)
+ 
+             view = ExecApprovalView(
+                 session_key=session_key,
+@@ -4887,7 +4890,7 @@ if DISCORD_AVAILABLE:
+         """
+         Interactive button view for exec approval of dangerous commands.
+ 
+-        Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
++        Shows four buttons: 批准本次, 本会话允许, 永久允许, 拒绝.
+         Clicking a button calls ``resolve_gateway_approval()`` to unblock the
+         waiting agent thread — the same mechanism as the text ``/approve`` flow.
+         Only users in the allowed list can click.  Times out after 5 minutes.
+@@ -4953,25 +4956,25 @@ if DISCORD_AVAILABLE:
+             except Exception as exc:
+                 logger.error("Failed to resolve gateway approval from button: %s", exc)
+ 
+-        @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
++        @discord.ui.button(label="批准本次", style=discord.ButtonStyle.green)
+         async def allow_once(
+             self, interaction: discord.Interaction, button: discord.ui.Button
+         ):
+             await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
+ 
+-        @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
++        @discord.ui.button(label="本会话允许", style=discord.ButtonStyle.grey)
+         async def allow_session(
+             self, interaction: discord.Interaction, button: discord.ui.Button
+         ):
+             await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
+ 
+-        @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
++        @discord.ui.button(label="永久允许", style=discord.ButtonStyle.blurple)
+         async def allow_always(
+             self, interaction: discord.Interaction, button: discord.ui.Button
+         ):
+             await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
+ 
+-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
++        @discord.ui.button(label="拒绝", style=discord.ButtonStyle.red)
+         async def deny(
+             self, interaction: discord.Interaction, button: discord.ui.Button
+         ):
+diff --git a/gateway/platforms/email.py b/gateway/platforms/email.py
+index 0fffb82d0..6443be61d 100644
+--- a/gateway/platforms/email.py
++++ b/gateway/platforms/email.py
+@@ -42,8 +42,15 @@ from gateway.platforms.base import (
+     cache_image_from_bytes,
+ )
+ from gateway.config import Platform, PlatformConfig
++from gateway.friendly_messages import get_persona
+ 
+ logger = logging.getLogger(__name__)
++
++
++def _default_subject() -> str:
++    return get_persona().display_name
++
++
+ # Automated sender patterns — emails from these are silently ignored
+ _NOREPLY_PATTERNS = (
+     "noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
+@@ -531,7 +538,7 @@ class EmailAdapter(BasePlatformAdapter):
+ 
+         # Thread context for reply
+         ctx = self._thread_context.get(to_addr, {})
+-        subject = ctx.get("subject", "Hermes Agent")
++        subject = ctx.get("subject", _default_subject())
+         if not subject.startswith("Re:"):
+             subject = f"Re: {subject}"
+         msg["Subject"] = subject
+@@ -641,7 +648,7 @@ class EmailAdapter(BasePlatformAdapter):
+         msg["To"] = to_addr
+ 
+         ctx = self._thread_context.get(to_addr, {})
+-        subject = ctx.get("subject", "Hermes Agent")
++        subject = ctx.get("subject", _default_subject())
+         if not subject.startswith("Re:"):
+             subject = f"Re: {subject}"
+         msg["Subject"] = subject
+@@ -722,7 +729,7 @@ class EmailAdapter(BasePlatformAdapter):
+         msg["To"] = to_addr
+ 
+         ctx = self._thread_context.get(to_addr, {})
+-        subject = ctx.get("subject", "Hermes Agent")
++        subject = ctx.get("subject", _default_subject())
+         if not subject.startswith("Re:"):
+             subject = f"Re: {subject}"
+         msg["Subject"] = subject
+diff --git a/gateway/platforms/feishu.py b/gateway/platforms/feishu.py
+index a9b044708..aa8921649 100644
+--- a/gateway/platforms/feishu.py
++++ b/gateway/platforms/feishu.py
+@@ -139,6 +139,7 @@ from gateway.platforms.base import (
+     cache_audio_from_bytes,
+     cache_image_from_bytes,
+ )
++from gateway.friendly_messages import approval_summary
+ from gateway.status import acquire_scoped_lock, release_scoped_lock
+ from hermes_constants import get_hermes_home
+ from utils import atomic_json_write
+@@ -1862,7 +1863,7 @@ class FeishuAdapter(BasePlatformAdapter):
+ 
+         try:
+             approval_id = next(self._approval_counter)
+-            cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
++            summary = approval_summary(command, session_key, description)
+ 
+             def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
+                 return {
+@@ -1875,21 +1876,27 @@ class FeishuAdapter(BasePlatformAdapter):
+             card = {
+                 "config": {"wide_screen_mode": True},
+                 "header": {
+-                    "title": {"content": "⚠️ Command Approval Required", "tag": "plain_text"},
++                    "title": {"content": f"🧯 命令需要审批｜{summary['risk_pill']}", "tag": "plain_text"},
+                     "template": "orange",
+                 },
+                 "elements": [
+                     {
+                         "tag": "markdown",
+-                        "content": f"```\n{cmd_preview}\n```\n**Reason:** {description}",
++                        "content": (
++                            "我已暂停执行。确认前，这条命令不会运行。\n\n"
++                            f"**风险｜** {summary['risk']}\n"
++                            f"**范围｜** {summary['scope']}\n"
++                            f"**命令｜**\n```\n{summary['command']}\n```\n"
++                            f"**审批 ID｜** `{summary['approval_id']}`"
++                        ),
+                     },
+                     {
+                         "tag": "action",
+                         "actions": [
+-                            _btn("✅ Allow Once", "approve_once", "primary"),
+-                            _btn("✅ Session", "approve_session"),
+-                            _btn("✅ Always", "approve_always"),
+-                            _btn("❌ Deny", "deny", "danger"),
++                            _btn("🟢 批准本次", "approve_once", "primary"),
++                            _btn("🕒 本会话允许", "approve_session"),
++                            _btn("📌 永久允许", "approve_always"),
++                            _btn("🔕 拒绝", "deny", "danger"),
+                         ],
+                     },
+                 ],
+diff --git a/gateway/platforms/homeassistant.py b/gateway/platforms/homeassistant.py
+index e7ea762e2..8ac15ba17 100644
+--- a/gateway/platforms/homeassistant.py
++++ b/gateway/platforms/homeassistant.py
+@@ -29,6 +29,7 @@ except ImportError:
+     aiohttp = None  # type: ignore[assignment]
+ 
+ from gateway.config import Platform, PlatformConfig
++from gateway.friendly_messages import get_persona
+ from gateway.platforms.base import (
+     BasePlatformAdapter,
+     MessageEvent,
+@@ -401,7 +402,7 @@ class HomeAssistantAdapter(BasePlatformAdapter):
+             "Content-Type": "application/json",
+         }
+         payload = {
+-            "title": "Hermes Agent",
++            "title": get_persona().display_name,
+             "message": content[:self.MAX_MESSAGE_LENGTH],
+         }
+ 
+diff --git a/gateway/platforms/matrix.py b/gateway/platforms/matrix.py
+index 95dc73201..03555f75d 100644
+--- a/gateway/platforms/matrix.py
++++ b/gateway/platforms/matrix.py
+@@ -103,6 +103,7 @@ from gateway.platforms.base import (
+     resolve_proxy_url,
+     proxy_kwargs_for_aiohttp,
+ )
++from gateway.friendly_messages import render_approval_request
+ from gateway.platforms.helpers import ThreadParticipationTracker
+ 
+ logger = logging.getLogger(__name__)
+@@ -434,8 +435,8 @@ class MatrixAdapter(BasePlatformAdapter):
+ 
+         # Matrix reaction-based dangerous command approvals.
+         self._approval_reaction_map = {
+-            "✅": "once",
+-            "❎": "deny",
++            "🟢": "once",
++            "🔕": "deny",
+         }
+         self._approval_prompts_by_event: Dict[str, _MatrixApprovalPrompt] = {}
+         self._approval_prompt_by_session: Dict[str, str] = {}
+@@ -1202,16 +1203,9 @@ class MatrixAdapter(BasePlatformAdapter):
+         if not self._client:
+             return SendResult(success=False, error="Not connected")
+ 
+-        cmd_preview = command[:2000] + "..." if len(command) > 2000 else command
+         text = (
+-            "⚠️ **Dangerous command requires approval**\n"
+-            f"```\n{cmd_preview}\n```\n"
+-            f"Reason: {description}\n\n"
+-            "Reply `/approve` to execute, `/approve session` to approve this pattern for the session, "
+-            "`/approve always` to approve permanently, or `/deny` to cancel.\n\n"
+-            "You can also click the reaction to approve:\n"
+-            "✅ = /approve\n"
+-            "❎ = /deny"
++            render_approval_request(command, session_key, description)
++            + "\n\n也可以点击表情处理：🟢 = 批准本次，🔕 = 拒绝"
+         )
+ 
+         result = await self.send(chat_id, text, metadata=metadata)
+@@ -1229,7 +1223,7 @@ class MatrixAdapter(BasePlatformAdapter):
+         self._approval_prompts_by_event[result.message_id] = prompt
+         self._approval_prompt_by_session[session_key] = result.message_id
+ 
+-        for emoji in ("✅", "❎"):
++        for emoji in ("🟢", "🔕"):
+             try:
+                 reaction_result = await self._send_reaction(chat_id, result.message_id, emoji)
+                 # Save the bot's reaction event_id for later cleanup
+diff --git a/gateway/platforms/qqbot/keyboards.py b/gateway/platforms/qqbot/keyboards.py
+index 19fd36e37..01c671b7b 100644
+--- a/gateway/platforms/qqbot/keyboards.py
++++ b/gateway/platforms/qqbot/keyboards.py
+@@ -34,6 +34,8 @@ import re
+ from dataclasses import dataclass, field
+ from typing import Any, Awaitable, Callable, Dict, List, Optional
+ 
++from gateway.friendly_messages import approval_summary
++
+ logger = logging.getLogger(__name__)
+ 
+ # ── button_data prefixes + patterns ──────────────────────────────────
+@@ -305,18 +307,19 @@ def build_approval_text(req: ApprovalRequest) -> str:
+ 
+ 
+ def _build_exec_text(req: ApprovalRequest) -> str:
+-    lines: List[str] = ["🔐 **命令执行审批**", ""]
+-    if req.command_preview:
+-        preview = req.command_preview[:300]
+-        lines.append(f"```\n{preview}\n```")
++    summary = approval_summary(req.command_preview, req.session_key, req.description)
++    lines: List[str] = [f"🧯 **命令需要审批｜{summary['risk_pill']}**", ""]
++    lines.append("我已暂停执行。确认前，这条命令不会运行。")
++    lines.append("")
++    lines.append(f"⚠️ 风险｜{summary['risk']}")
++    lines.append(f"📍 范围｜{summary['scope']}")
+     if req.cwd:
+-        lines.append(f"📁 目录: {req.cwd}")
+-    if req.title and req.title != req.command_preview:
+-        lines.append(f"📋 {req.title}")
+-    if req.description:
+-        lines.append(f"📝 {req.description}")
++        lines.append(f"📁 目录｜{req.cwd}")
++    if req.command_preview:
++        lines.append(f"💻 命令｜\n```\n{summary['command'][:300]}\n```")
++    lines.append(f"🔖 审批 ID｜`{summary['approval_id']}`")
+     lines.append("")
+-    lines.append(f"⏱️ 超时: {req.timeout_sec} 秒")
++    lines.append(f"⏱️ 超时｜{req.timeout_sec} 秒")
+     return "\n".join(lines)
+ 
+ 
+diff --git a/gateway/platforms/slack.py b/gateway/platforms/slack.py
+index 2116b569f..f5d61e50c 100644
+--- a/gateway/platforms/slack.py
++++ b/gateway/platforms/slack.py
+@@ -48,6 +48,7 @@ from gateway.platforms.base import (
+     safe_url_for_log,
+     cache_document_from_bytes,
+ )
++from gateway.friendly_messages import approval_summary
+ 
+ 
+ logger = logging.getLogger(__name__)
+@@ -2253,7 +2254,7 @@ class SlackAdapter(BasePlatformAdapter):
+             return SendResult(success=False, error="Not connected")
+ 
+         try:
+-            cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
++            summary = approval_summary(command, session_key, description)
+             thread_ts = self._resolve_thread_ts(None, metadata)
+ 
+             blocks = [
+@@ -2262,9 +2263,12 @@ class SlackAdapter(BasePlatformAdapter):
+                     "text": {
+                         "type": "mrkdwn",
+                         "text": (
+-                            f":warning: *Command Approval Required*\n"
+-                            f"```{cmd_preview}```\n"
+-                            f"Reason: {description}"
++                            f":fire_extinguisher: *命令需要审批*｜{summary['risk_pill']}\n"
++                            "我已暂停执行。确认前，这条命令不会运行。\n\n"
++                            f"*风险*｜{summary['risk']}\n"
++                            f"*范围*｜{summary['scope']}\n"
++                            f"*命令*｜```{summary['command']}```\n"
++                            f"*审批 ID*｜`{summary['approval_id']}`"
+                         ),
+                     },
+                 },
+@@ -2273,26 +2277,26 @@ class SlackAdapter(BasePlatformAdapter):
+                     "elements": [
+                         {
+                             "type": "button",
+-                            "text": {"type": "plain_text", "text": "Allow Once"},
++                            "text": {"type": "plain_text", "text": "批准本次"},
+                             "style": "primary",
+                             "action_id": "hermes_approve_once",
+                             "value": session_key,
+                         },
+                         {
+                             "type": "button",
+-                            "text": {"type": "plain_text", "text": "Allow Session"},
++                            "text": {"type": "plain_text", "text": "本会话允许"},
+                             "action_id": "hermes_approve_session",
+                             "value": session_key,
+                         },
+                         {
+                             "type": "button",
+-                            "text": {"type": "plain_text", "text": "Always Allow"},
++                            "text": {"type": "plain_text", "text": "永久允许"},
+                             "action_id": "hermes_approve_always",
+                             "value": session_key,
+                         },
+                         {
+                             "type": "button",
+-                            "text": {"type": "plain_text", "text": "Deny"},
++                            "text": {"type": "plain_text", "text": "拒绝"},
+                             "style": "danger",
+                             "action_id": "hermes_deny",
+                             "value": session_key,
+@@ -2303,7 +2307,7 @@ class SlackAdapter(BasePlatformAdapter):
+ 
+             kwargs: Dict[str, Any] = {
+                 "channel": chat_id,
+-                "text": f"⚠️ Command approval required: {cmd_preview[:100]}",
++                "text": f"🧯 命令需要审批：{summary['command'][:100]}",
+                 "blocks": blocks,
+             }
+             if thread_ts:
+diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
+index 4c56937e5..6c40f64b9 100644
+--- a/gateway/platforms/telegram.py
++++ b/gateway/platforms/telegram.py
+@@ -78,6 +78,7 @@ from gateway.platforms.base import (
+     SUPPORTED_DOCUMENT_TYPES,
+     utf16_len,
+ )
++from gateway.friendly_messages import approval_summary
+ from gateway.platforms.telegram_network import (
+     TelegramFallbackTransport,
+     discover_fallback_ips,
+@@ -2119,11 +2120,14 @@ class TelegramAdapter(BasePlatformAdapter):
+             return SendResult(success=False, error="Not connected")
+ 
+         try:
+-            cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
++            summary = approval_summary(command, session_key, description)
+             text = (
+-                f"⚠️ <b>Command Approval Required</b>\n\n"
+-                f"<pre>{_html.escape(cmd_preview)}</pre>\n\n"
+-                f"Reason: {_html.escape(description)}"
++                f"🧯 <b>命令需要审批</b>｜{_html.escape(summary['risk_pill'])}\n\n"
++                "我已暂停执行。确认前，这条命令不会运行。\n\n"
++                f"<b>风险</b>｜{_html.escape(summary['risk'])}\n"
++                f"<b>范围</b>｜{_html.escape(summary['scope'])}\n"
++                f"<b>命令</b>｜\n<pre>{_html.escape(summary['command'])}</pre>\n"
++                f"<b>审批 ID</b>｜{_html.escape(summary['approval_id'])}"
+             )
+ 
+             # Resolve thread context for thread replies
+@@ -2139,12 +2143,12 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+             keyboard = InlineKeyboardMarkup([
+                 [
+-                    InlineKeyboardButton("✅ Allow Once", callback_data=f"ea:once:{approval_id}"),
+-                    InlineKeyboardButton("✅ Session", callback_data=f"ea:session:{approval_id}"),
++                    InlineKeyboardButton("🟢 批准本次", callback_data=f"ea:once:{approval_id}"),
++                    InlineKeyboardButton("🕒 本会话允许", callback_data=f"ea:session:{approval_id}"),
+                 ],
+                 [
+-                    InlineKeyboardButton("✅ Always", callback_data=f"ea:always:{approval_id}"),
+-                    InlineKeyboardButton("❌ Deny", callback_data=f"ea:deny:{approval_id}"),
++                    InlineKeyboardButton("📌 永久允许", callback_data=f"ea:always:{approval_id}"),
++                    InlineKeyboardButton("🔕 拒绝", callback_data=f"ea:deny:{approval_id}"),
+                 ],
+             ])
+ 
+diff --git a/gateway/platforms/weixin.py b/gateway/platforms/weixin.py
+index 911074040..23879d746 100644
+--- a/gateway/platforms/weixin.py
++++ b/gateway/platforms/weixin.py
+@@ -66,6 +66,7 @@ from gateway.platforms.base import (
+     cache_document_from_bytes,
+     cache_image_from_bytes,
+ )
++from gateway.friendly_messages import render_approval_request
+ from hermes_constants import get_hermes_home
+ from utils import atomic_json_write
+ 
+@@ -1732,6 +1733,27 @@ class WeixinAdapter(BasePlatformAdapter):
+             logger.error("[%s] send failed to=%s: %s", self.name, _safe_id(chat_id), exc)
+             return SendResult(success=False, error=str(exc))
+ 
++    async def send_exec_approval(
++        self,
++        chat_id: str,
++        command: str,
++        session_key: str,
++        description: str = "dangerous command",
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> SendResult:
++        """Send a Weixin-friendly text approval card.
++
++        Weixin does not expose universal bot-side interactive buttons here, so
++        the card uses explicit numbered/text choices.  gateway/run.py parses
++        those replies and resolves the same blocking approval queue as /approve.
++        """
++
++        return await self.send(
++            chat_id,
++            render_approval_request(command, session_key, description),
++            metadata=metadata,
++        )
++
+     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+         if not self._send_session or not self._token:
+             return
+diff --git a/gateway/platforms/whatsapp.py b/gateway/platforms/whatsapp.py
+index 0ca3d41fa..86fda1009 100644
+--- a/gateway/platforms/whatsapp.py
++++ b/gateway/platforms/whatsapp.py
+@@ -29,6 +29,7 @@ _IS_WINDOWS = platform.system() == "Windows"
+ from pathlib import Path
+ from typing import Dict, Optional, Any
+ 
++from gateway.friendly_messages import get_persona
+ from hermes_constants import get_hermes_dir
+ 
+ logger = logging.getLogger(__name__)
+@@ -242,7 +243,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
+     # WhatsApp message limits — practical UX limit, not protocol max.
+     # WhatsApp allows ~65K but long messages are unreadable on mobile.
+     MAX_MESSAGE_LENGTH = 4096
+-    DEFAULT_REPLY_PREFIX = "⚕ *Hermes Agent*\n────────────\n"
++    DEFAULT_REPLY_PREFIX = None
+     
+     # Default bridge location relative to the hermes-agent install
+     _DEFAULT_BRIDGE_DIR = Path(__file__).resolve().parents[2] / "scripts" / "whatsapp-bridge"
+@@ -288,7 +289,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
+         env_prefix = os.getenv("WHATSAPP_REPLY_PREFIX")
+         if env_prefix is not None:
+             return env_prefix.replace("\\n", "\n")
+-        return self.DEFAULT_REPLY_PREFIX
++        return f"⚕ *{get_persona().display_name}*\n────────────\n"
+ 
+     def _outgoing_chunk_limit(self) -> int:
+         """Reserve room for the bridge-side prefix so final WhatsApp text fits."""
+diff --git a/gateway/run.py b/gateway/run.py
+index 4156838ac..c32a12e1a 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -52,6 +52,27 @@ from typing import Dict, Optional, Any, List, Union
+ from agent.account_usage import fetch_account_usage, render_account_usage_lines
+ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
++from gateway.friendly_messages import (
++    parse_approval_reply,
++    render_approval_denied,
++    render_approval_request,
++    render_approval_resolved,
++    render_busy_ack,
++    render_inactivity_timeout,
++    render_inactivity_warning,
++    render_no_pending_approval,
++    render_background_failure,
++    render_background_result,
++    render_pairing_code,
++    render_pairing_rate_limited,
++    render_persona_reply,
++    render_task_progress,
++    render_telegram_topic_new_header,
++    render_telegram_topic_root_lobby,
++    render_telegram_topic_root_new,
++    render_unknown_command,
++    render_update_result,
++)
+ from hermes_cli.config import cfg_get
+ 
+ # --- Agent cache tuning ---------------------------------------------------
+@@ -1769,32 +1790,15 @@ class GatewayRunner:
+         return True
+ 
+     def _telegram_topic_root_lobby_message(self) -> str:
+-        return (
+-            "This main chat is reserved for system commands.\n\n"
+-            "To start a new Hermes chat, open the All Messages topic at the top "
+-            "of this bot interface and send any message there. Telegram will "
+-            "create a new topic for that message; each topic works as an "
+-            "independent Hermes session."
+-        )
++        return render_telegram_topic_root_lobby()
+ 
+     def _telegram_topic_root_new_message(self) -> str:
+-        return (
+-            "To start a new parallel Hermes chat, open the All Messages topic "
+-            "at the top of this bot interface and send any message there. "
+-            "Telegram will create a new topic for it.\n\n"
+-            "Each topic is an independent Hermes session. Use /new inside an "
+-            "existing topic only if you want to replace that topic's current session."
+-        )
++        return render_telegram_topic_root_new()
+ 
+     def _telegram_topic_new_header(self, source: SessionSource) -> Optional[str]:
+         if not self._is_telegram_topic_lane(source):
+             return None
+-        return (
+-            "Started a new Hermes session in this topic.\n\n"
+-            "Tip: for parallel work, open All Messages and send a message there "
+-            "to create a separate topic instead of using /new here. /new replaces "
+-            "the session attached to the current topic."
+-        )
++        return render_telegram_topic_new_header()
+ 
+     def _record_telegram_topic_binding(
+         self,
+@@ -2695,56 +2699,30 @@ class GatewayRunner:
+ 
+         self._busy_ack_ts[session_key] = now
+ 
+-        # Build a status-rich acknowledgment
+-        status_parts = []
++        # Build a user-friendly acknowledgment.  Keep detailed iteration/tool
++        # diagnostics in logs only; user-facing text should not leak loop state.
++        activity_summary = None
++        elapsed_min = None
+         if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
+             try:
+-                summary = running_agent.get_activity_summary()
+-                iteration = summary.get("api_call_count", 0)
+-                max_iter = summary.get("max_iterations", 0)
+-                current_tool = summary.get("current_tool")
++                activity_summary = running_agent.get_activity_summary()
+                 start_ts = self._running_agents_ts.get(session_key, 0)
+                 if start_ts:
+                     elapsed_min = int((now - start_ts) / 60)
+-                    if elapsed_min > 0:
+-                        status_parts.append(f"{elapsed_min} min elapsed")
+-                if max_iter:
+-                    status_parts.append(f"iteration {iteration}/{max_iter}")
+-                if current_tool:
+-                    status_parts.append(f"running: {current_tool}")
+             except Exception:
+                 pass
+ 
+-        status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+         if is_steer_mode:
+-            message = (
+-                f"⏩ 已接入当前任务｜消息会在下一次工具调用后生效\n\n"
+-                "【状态】\n"
+-                f"动作｜已尝试追加到当前运行{status_detail}\n"
+-                "结果｜当前任务继续执行\n"
+-                "影响｜不会开启第二个并发任务\n"
+-                "边界｜如果工具调用长期无返回，仍会进入超时保护\n\n"
+-                "【下一步】\n请等待当前任务继续输出。"
++            message = render_busy_ack(
++                "steer", activity_summary, elapsed_mins=elapsed_min
+             )
+         elif is_queue_mode:
+-            message = (
+-                f"⏳ 已排到下一轮｜当前任务完成后处理\n\n"
+-                "【状态】\n"
+-                f"动作｜已保存你的后续消息{status_detail}\n"
+-                "结果｜当前任务完成后会自动继续\n"
+-                "影响｜不会打断正在执行的任务\n"
+-                "边界｜短时间多条消息会合并，避免刷屏\n\n"
+-                "【下一步】\n请等待当前任务结束，我会继续处理。"
++            message = render_busy_ack(
++                "queue", activity_summary, elapsed_mins=elapsed_min
+             )
+         else:
+-            message = (
+-                f"⚡ 正在切换到你的新消息｜当前任务会被中断\n\n"
+-                "【状态】\n"
+-                f"动作｜已请求中断当前任务{status_detail}\n"
+-                "结果｜会尽快处理你的新消息\n"
+-                "影响｜当前任务可能不会继续输出\n"
+-                "边界｜只发送一次中断确认\n\n"
+-                "【下一步】\n请稍等，我会回复新的请求。"
++            message = render_busy_ack(
++                "interrupt", activity_summary, elapsed_mins=elapsed_min
+             )
+ 
+         # First-touch onboarding: the very first time a user sends a message
+@@ -5895,18 +5873,14 @@ class GatewayRunner:
+                     if adapter:
+                         await adapter.send(
+                             source.chat_id,
+-                            f"Hi~ I don't recognize you yet!\n\n"
+-                            f"Here's your pairing code: `{code}`\n\n"
+-                            f"Ask the bot owner to run:\n"
+-                            f"`hermes pairing approve {platform_name} {code}`"
++                            render_pairing_code(platform_name, code),
+                         )
+                 else:
+                     adapter = self.adapters.get(source.platform)
+                     if adapter:
+                         await adapter.send(
+                             source.chat_id,
+-                            "Too many pairing requests right now~ "
+-                            "Please try again later!"
++                            render_pairing_rate_limited(),
+                         )
+                     # Record rate limit so subsequent messages are silently ignored
+                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
+@@ -6019,6 +5993,36 @@ class GatewayRunner:
+                     # itself will produce the next user-facing message.
+                     return ""
+ 
++        # Intercept friendly natural-language replies to dangerous-command
++        # approvals.  Slash commands are still handled by the normal command
++        # dispatcher below, but text platforms such as Weixin can now reply
++        # with "批准本次" / "本会话允许" / "永久允许" / "拒绝".
++        try:
++            from tools.approval import has_blocking_approval as _has_tool_approval
++            _friendly_tool_approval_live = _has_tool_approval(_quick_key)
++        except Exception:
++            _friendly_tool_approval_live = False
++        if _friendly_tool_approval_live:
++            _friendly_choice = parse_approval_reply(event.text or "")
++            if _friendly_choice is not None:
++                if _friendly_choice == "deny":
++                    return await self._handle_deny_command(
++                        dataclasses.replace(event, text="/deny")
++                    )
++                _suffix = {
++                    "once": "",
++                    "session": " session",
++                    "always": " always",
++                }[_friendly_choice]
++                return await self._handle_approve_command(
++                    dataclasses.replace(event, text=f"/approve{_suffix}")
++                )
++
++        if not event.get_command():
++            _persona_reply = render_persona_reply(event.text or "")
++            if _persona_reply is not None:
++                return _persona_reply
++
+         # Intercept messages that are responses to a pending /reload-mcp
+         # (or future) slash-confirm prompt.  Recognized confirm replies are
+         # /approve, /always, /cancel (plus short aliases).  Anything else
+@@ -6824,10 +6828,7 @@ class GatewayRunner:
+                             source.platform.value if source.platform else "?",
+                         )
+                         return (
+-                            f"Unknown command `/{command}`. "
+-                            f"Type /commands to see what's available, "
+-                            f"or resend without the leading slash to send "
+-                            f"as a regular message."
++                            render_unknown_command(command)
+                         )
+             except Exception as e:
+                 logger.debug("Skill command check failed (non-fatal): %s", e)
+@@ -10642,7 +10643,7 @@ class GatewayRunner:
+             if not runtime_kwargs.get("api_key"):
+                 await adapter.send(
+                     source.chat_id,
+-                    f"❌ Background task {task_id} failed: no provider credentials configured.",
++                    render_background_failure(task_id, "no provider credentials configured"),
+                     metadata=_thread_metadata,
+                 )
+                 return
+@@ -10727,18 +10728,17 @@ class GatewayRunner:
+                 images, text_content = adapter.extract_images(response)
+ 
+                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
+-                header = f'✅ Background task complete\nPrompt: "{preview}"\n\n'
+ 
+                 if text_content:
+                     await adapter.send(
+                         chat_id=source.chat_id,
+-                        content=header + text_content,
++                        content=render_background_result(preview, text_content),
+                         metadata=_thread_metadata,
+                     )
+                 elif not images and not media_files:
+                     await adapter.send(
+                         chat_id=source.chat_id,
+-                        content=header + "(No response generated)",
++                        content=render_background_result(preview, None),
+                         metadata=_thread_metadata,
+                     )
+ 
+@@ -10768,7 +10768,7 @@ class GatewayRunner:
+                 preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
+                 await adapter.send(
+                     chat_id=source.chat_id,
+-                    content=f'✅ Background task complete\nPrompt: "{preview}"\n\n(No response generated)',
++                    content=render_background_result(preview, None),
+                     metadata=_thread_metadata,
+                 )
+ 
+@@ -10777,7 +10777,7 @@ class GatewayRunner:
+             try:
+                 await adapter.send(
+                     chat_id=source.chat_id,
+-                    content=f"❌ Background task {task_id} failed: {e}",
++                    content=render_background_failure(task_id, str(e)),
+                     metadata=_thread_metadata,
+                 )
+             except Exception:
+@@ -12613,7 +12613,7 @@ class GatewayRunner:
+             if session_key in self._pending_approvals:
+                 self._pending_approvals.pop(session_key)
+                 return t("gateway.approval_expired")
+-            return t("gateway.approve.no_pending")
++            return render_no_pending_approval("approve")
+ 
+         # Parse args: support "all", "all session", "all always", "session", "always"
+         args = event.get_command_args().strip().lower().split()
+@@ -12629,7 +12629,7 @@ class GatewayRunner:
+ 
+         count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+         if not count:
+-            return t("gateway.approve.no_pending")
++            return render_no_pending_approval("approve")
+ 
+         # Resume typing indicator — agent is about to continue processing.
+         _adapter = self.adapters.get(source.platform)
+@@ -12637,8 +12637,7 @@ class GatewayRunner:
+             _adapter.resume_typing_for_chat(source.chat_id)
+ 
+         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
+-        plural = "plural" if count > 1 else "singular"
+-        return t(f"gateway.approve.{choice}_{plural}", count=count)
++        return render_approval_resolved(choice, count=count)
+ 
+     async def _handle_deny_command(self, event: MessageEvent) -> str:
+         """Handle /deny command — reject pending dangerous command(s).
+@@ -12659,14 +12658,14 @@ class GatewayRunner:
+             if session_key in self._pending_approvals:
+                 self._pending_approvals.pop(session_key)
+                 return t("gateway.deny.stale")
+-            return t("gateway.deny.no_pending")
++            return render_no_pending_approval("deny")
+ 
+         args = event.get_command_args().strip().lower()
+         resolve_all = "all" in args
+ 
+         count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all)
+         if not count:
+-            return t("gateway.deny.no_pending")
++            return render_no_pending_approval("deny")
+ 
+         # Resume typing indicator — agent continues (with BLOCKED result).
+         _adapter = self.adapters.get(source.platform)
+@@ -12674,9 +12673,7 @@ class GatewayRunner:
+             _adapter.resume_typing_for_chat(source.chat_id)
+ 
+         logger.info("User denied %d dangerous command(s) via /deny", count)
+-        if count > 1:
+-            return t("gateway.deny.denied_plural", count=count)
+-        return t("gateway.deny.denied_singular")
++        return render_approval_denied(count=count)
+ 
+     # Platforms where /update is allowed.  ACP, API server, and webhooks are
+     # programmatic interfaces that should not trigger system updates.
+@@ -12996,14 +12993,11 @@ class GatewayRunner:
+                 try:
+                     exit_code_raw = exit_code_path.read_text().strip() or "1"
+                     exit_code = int(exit_code_raw)
+-                    if exit_code == 0:
+-                        await adapter.send(chat_id, "✅ Hermes update finished.", metadata=metadata)
+-                    else:
+-                        await adapter.send(
+-                            chat_id,
+-                            "❌ Hermes update failed (exit code {}).".format(exit_code),
+-                            metadata=metadata,
+-                        )
++                    await adapter.send(
++                        chat_id,
++                        render_update_result(exit_code == 0, exit_code=exit_code),
++                        metadata=metadata,
++                    )
+                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
+                 except Exception as e:
+                     logger.warning("Update final notification failed: %s", e)
+@@ -13161,14 +13155,11 @@ class GatewayRunner:
+                 if output:
+                     if len(output) > 3500:
+                         output = "…" + output[-3500:]
+-                    if exit_code == 0:
+-                        msg = f"✅ Hermes update finished.\n\n```\n{output}\n```"
+-                    else:
+-                        msg = f"❌ Hermes update failed.\n\n```\n{output}\n```"
++                    msg = render_update_result(exit_code == 0, output, exit_code=exit_code)
+                 elif exit_code == 0:
+-                    msg = "✅ Hermes update finished successfully."
++                    msg = render_update_result(True, exit_code=exit_code)
+                 else:
+-                    msg = "❌ Hermes update failed. Check the gateway logs or run `hermes update` manually for details."
++                    msg = render_update_result(False, exit_code=exit_code)
+                 await adapter.send(chat_id, msg, metadata=metadata)
+                 logger.info(
+                     "Sent post-update notification to %s:%s (exit=%s)",
+@@ -15603,14 +15594,13 @@ class GatewayRunner:
+                             "Button-based approval failed, falling back to text: %s", _e
+                         )
+ 
+-                # Fallback: plain text approval prompt
+-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+-                msg = (
+-                    f"⚠️ **Dangerous command requires approval:**\n"
+-                    f"```\n{cmd_preview}\n```\n"
+-                    f"Reason: {desc}\n\n"
+-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
+-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
++                # Fallback: friendly text approval prompt.  Text-only platforms
++                # can reply with the Chinese choices; slash commands remain
++                # accepted but are no longer the primary UX.
++                msg = render_approval_request(
++                    cmd,
++                    session_key=_approval_session_key,
++                    description=desc,
+                 )
+                 try:
+                     _approval_send_fut = safe_schedule_threadsafe(
+@@ -16043,30 +16033,16 @@ class GatewayRunner:
+                 _elapsed_mins = int((time.time() - _notify_start) // 60)
+                 # Include agent activity context if available.
+                 _agent_ref = agent_holder[0]
+-                _status_detail = ""
++                _activity_summary = None
+                 if _agent_ref and hasattr(_agent_ref, "get_activity_summary"):
+                     try:
+-                        _a = _agent_ref.get_activity_summary()
+-                        _parts = [f"iteration {_a['api_call_count']}/{_a['max_iterations']}"]
+-                        if _a.get("current_tool"):
+-                            _parts.append(f"running: {_a['current_tool']}")
+-                        else:
+-                            _parts.append(_a.get("last_activity_desc", ""))
+-                        _status_detail = " — " + ", ".join(_parts)
++                        _activity_summary = _agent_ref.get_activity_summary()
+                     except Exception:
+                         pass
+                 try:
+                     _notify_res = await _notify_adapter.send(
+                         source.chat_id,
+-                        (
+-                            f"⏳ 任务仍在处理中｜已运行约 {_elapsed_mins} 分钟\n\n"
+-                            "【状态】\n"
+-                            f"动作｜继续等待后台任务{_status_detail}\n"
+-                            "结果｜尚未完成，但仍有活动迹象\n"
+-                            "影响｜我不会重复刷屏，只保留这一次进度提示\n"
+-                            "边界｜如果后续无活动，会进入超时保护\n\n"
+-                            "【下一步】\n你可以继续等待，或发送 /reset 取消当前会话。"
+-                        ),
++                        render_task_progress(_elapsed_mins, _activity_summary),
+                         metadata=_status_thread_metadata,
+                     )
+                     if (
+@@ -16163,14 +16139,9 @@ class GatewayRunner:
+                             try:
+                                 await _warn_adapter.send(
+                                     source.chat_id,
+-                                    (
+-                                        f"⚠️ 会话活动变慢｜约 {_elapsed_warn} 分钟没有新进展\n\n"
+-                                        "【状态】\n"
+-                                        "动作｜已启动超时保护观察\n"
+-                                        f"结果｜如果仍无活动，约 {_remaining_mins} 分钟后会自动停止\n"
+-                                        "影响｜避免后台任务无限占用会话\n"
+-                                        "边界｜不会重复发送原始错误或内部堆栈\n\n"
+-                                        "【下一步】\n你可以继续等待，或发送 /reset 立即重置。"
++                                    render_inactivity_warning(
++                                        _elapsed_warn,
++                                        _remaining_mins,
+                                     ),
+                                     metadata=_status_thread_metadata,
+                                 )
+@@ -16228,31 +16199,11 @@ class GatewayRunner:
+ 
+                 _timeout_mins = int(_agent_timeout // 60) or 1
+ 
+-                # Construct a user-facing message with diagnostic context.
+-                _diag_lines = [
+-                    f"⏱️ Agent inactive for {_timeout_mins} min — no tool calls "
+-                    f"or API responses."
+-                ]
+-                if _cur_tool:
+-                    _diag_lines.append(
+-                        f"The agent appears stuck on tool `{_cur_tool}` "
+-                        f"({_secs_ago:.0f}s since last activity, "
+-                        f"iteration {_iter_n}/{_iter_max})."
+-                    )
+-                else:
+-                    _diag_lines.append(
+-                        f"Last activity: {_last_desc} ({_secs_ago:.0f}s ago, "
+-                        f"iteration {_iter_n}/{_iter_max}). "
+-                        "The agent may have been waiting on an API response."
+-                    )
+-                _diag_lines.append(
+-                    "To increase the limit, set agent.gateway_timeout in config.yaml "
+-                    "(value in seconds, 0 = no limit) and restart the gateway.\n"
+-                    "Try again, or use /reset to start fresh."
+-                )
+-
+                 response = {
+-                    "final_response": "\n".join(_diag_lines),
++                    "final_response": render_inactivity_timeout(
++                        _timeout_mins,
++                        _activity,
++                    ),
+                     "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
+                     "api_calls": _iter_n,
+                     "tools": tools_holder[0] or [],
+diff --git a/tests/cron/test_scheduler.py b/tests/cron/test_scheduler.py
+index 0995f43ad..ba48ea53e 100644
+--- a/tests/cron/test_scheduler.py
++++ b/tests/cron/test_scheduler.py
+@@ -441,10 +441,10 @@ class TestRoutingIntents:
+ 
+ 
+ class TestDeliverResultWrapping:
+-    """Verify that cron deliveries are wrapped with header/footer and no longer mirrored."""
++    """Verify cron deliveries use the friendly user-facing template."""
+ 
+-    def test_delivery_wraps_content_with_header_and_footer(self):
+-        """Delivered content should include task name header and agent-invisible note."""
++    def test_delivery_wraps_content_with_friendly_card(self):
++        """Delivered content should use the compact Chinese card contract."""
+         from gateway.config import Platform
+ 
+         pconfig = MagicMock()
+@@ -464,11 +464,15 @@ class TestDeliverResultWrapping:
+ 
+         send_mock.assert_called_once()
+         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+-        assert "Cronjob Response: daily-report" in sent_content
+-        assert "(job_id: test-job)" in sent_content
+-        assert "-------------" in sent_content
++        assert "🌿 定时任务已完成｜daily-report" in sent_content
++        assert "【状态】" in sent_content
++        assert "动作｜已完成本轮自动执行并发送结果" in sent_content
++        assert "结果｜Here is today's summary." in sent_content
+         assert "Here is today's summary." in sent_content
+-        assert "To stop or manage this job" in sent_content
++        assert "【下一步】" in sent_content
++        assert "Cronjob Response" not in sent_content
++        assert "job_id" not in sent_content
++        assert "To stop or manage this job" not in sent_content
+ 
+     def test_delivery_uses_job_id_when_no_name(self):
+         """When a job has no name, the wrapper should fall back to job id."""
+@@ -489,7 +493,9 @@ class TestDeliverResultWrapping:
+             _deliver_result(job, "Output.")
+ 
+         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+-        assert "Cronjob Response: abc-123" in sent_content
++        assert "🌿 定时任务已完成｜abc-123" in sent_content
++        assert "Cronjob Response" not in sent_content
++        assert "job_id" not in sent_content
+ 
+     def test_delivery_skips_wrapping_when_config_disabled(self):
+         """When cron.wrap_response is false, deliver raw content without header/footer."""
+@@ -515,7 +521,7 @@ class TestDeliverResultWrapping:
+         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+         assert sent_content == "Clean output only."
+         assert "Cronjob Response" not in sent_content
+-        assert "The agent cannot see" not in sent_content
++        assert "定时任务已完成" not in sent_content
+ 
+     def test_delivery_extracts_media_tags_before_send(self):
+         """Cron delivery should pass MEDIA attachments separately to the send helper."""
+@@ -633,10 +639,14 @@ class TestDeliverResultWrapping:
+ 
+         assert "【状态】" in card
+         assert "【下一步】" in card
++        assert "⚠️ 这轮任务没跑完｜daily" in card
++        assert "动作｜已记录失败并停止本轮自动补发" in card
+         assert "RuntimeError" not in card
+         assert "HTTP 502" not in card
+         assert "ret=-2" not in card
+         assert "Traceback" not in card
++        assert "Cronjob Response" not in card
++        assert "To stop or manage this job" not in card
+ 
+     def test_live_adapter_routes_image_to_send_image_file(self):
+         """Image MEDIA files should be routed to send_image_file, not send_voice."""
+diff --git a/tests/gateway/test_approve_deny_commands.py b/tests/gateway/test_approve_deny_commands.py
+index ebe4d5917..76932ee94 100644
+--- a/tests/gateway/test_approve_deny_commands.py
++++ b/tests/gateway/test_approve_deny_commands.py
+@@ -9,6 +9,7 @@ via a per-session queue.
+ """
+ 
+ import asyncio
++import dataclasses
+ import os
+ import threading
+ import time
+@@ -214,8 +215,8 @@ class TestApproveCommand:
+         _gateway_queues[session_key] = [entry]
+ 
+         result = await runner._handle_approve_command(_make_event("/approve"))
+-        assert "approved" in result.lower()
+-        assert "resuming" in result.lower()
++        assert "命令已批准" in result
++        assert "代理正在恢复执行" in result
+         assert entry.event.is_set()
+ 
+     @pytest.mark.asyncio
+@@ -232,7 +233,7 @@ class TestApproveCommand:
+         _gateway_queues[session_key] = [e1, e2]
+ 
+         result = await runner._handle_approve_command(_make_event("/approve all"))
+-        assert "2 commands" in result
++        assert "2 条待审批命令" in result
+         assert e1.event.is_set()
+         assert e2.event.is_set()
+ 
+@@ -250,7 +251,7 @@ class TestApproveCommand:
+         _gateway_queues[session_key] = [e1, e2]
+ 
+         result = await runner._handle_approve_command(_make_event("/approve all session"))
+-        assert "session" in result.lower()
++        assert "本会话允许" in result
+         assert e1.result == "session"
+         assert e2.result == "session"
+ 
+@@ -259,7 +260,7 @@ class TestApproveCommand:
+         """/approve with no pending approval returns helpful message."""
+         runner = _make_runner()
+         result = await runner._handle_approve_command(_make_event("/approve"))
+-        assert "No pending command" in result
++        assert "没有待批准的命令" in result
+ 
+     @pytest.mark.asyncio
+     async def test_approve_stale_old_style_pending(self):
+@@ -297,7 +298,7 @@ class TestDenyCommand:
+         _gateway_queues[session_key] = [entry]
+ 
+         result = await runner._handle_deny_command(_make_event("/deny"))
+-        assert "denied" in result.lower()
++        assert "命令已拒绝" in result
+         assert entry.event.is_set()
+         assert entry.result == "deny"
+ 
+@@ -315,7 +316,7 @@ class TestDenyCommand:
+         _gateway_queues[session_key] = [e1, e2]
+ 
+         result = await runner._handle_deny_command(_make_event("/deny all"))
+-        assert "2 commands" in result
++        assert "2 条待审批命令" in result
+         assert all(e.result == "deny" for e in [e1, e2])
+ 
+     @pytest.mark.asyncio
+@@ -323,7 +324,7 @@ class TestDenyCommand:
+         """/deny with no pending approval returns helpful message."""
+         runner = _make_runner()
+         result = await runner._handle_deny_command(_make_event("/deny"))
+-        assert "No pending command" in result
++        assert "没有待拒绝的命令" in result
+ 
+ 
+ # ------------------------------------------------------------------
+@@ -351,6 +352,49 @@ class TestBareTextNoLongerApproves:
+         # "yes" is not /approve — entry should still be pending
+         assert not entry.event.is_set()
+ 
++    @pytest.mark.asyncio
++    async def test_friendly_reply_approves_pending_command(self):
++        """Explicit friendly choices resolve approvals on text-only platforms."""
++        from tools.approval import _ApprovalEntry, _gateway_queues
++        from gateway.run import GatewayRunner
++
++        runner = _make_runner()
++        source = _make_source()
++        session_key = runner._session_key_for_source(source)
++        entry = _ApprovalEntry({"command": "test"})
++        _gateway_queues[session_key] = [entry]
++
++        async def _approve(event):
++            return await GatewayRunner._handle_approve_command(runner, event)
++
++        async def _deny(event):
++            return await GatewayRunner._handle_deny_command(runner, event)
++
++        # Exercise the same natural-language interception logic as run.py
++        # without constructing a full gateway lifecycle.
++        event = dataclasses.replace(_make_event("永久允许"), text="/approve always")
++        result = await _approve(event)
++
++        assert "永久允许" in result
++        assert entry.event.is_set()
++        assert entry.result == "always"
++
++    @pytest.mark.asyncio
++    async def test_friendly_reply_denies_pending_command(self):
++        from tools.approval import _ApprovalEntry, _gateway_queues
++
++        runner = _make_runner()
++        source = _make_source()
++        session_key = runner._session_key_for_source(source)
++        entry = _ApprovalEntry({"command": "test"})
++        _gateway_queues[session_key] = [entry]
++
++        result = await runner._handle_deny_command(dataclasses.replace(_make_event("拒绝"), text="/deny"))
++
++        assert "命令已拒绝" in result
++        assert entry.event.is_set()
++        assert entry.result == "deny"
++
+ 
+ # ------------------------------------------------------------------
+ # End-to-end blocking flow
+diff --git a/tests/gateway/test_background_command.py b/tests/gateway/test_background_command.py
+index 9c156960c..0cb53788b 100644
+--- a/tests/gateway/test_background_command.py
++++ b/tests/gateway/test_background_command.py
+@@ -228,7 +228,9 @@ class TestRunBackgroundTask:
+         # Should have sent an error message
+         mock_adapter.send.assert_called_once()
+         call_args = mock_adapter.send.call_args
+-        assert "failed" in call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "").lower()
++        content = call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "")
++        assert "后台任务没跑完" in content
++        assert "no provider credentials configured" in content
+ 
+     @pytest.mark.asyncio
+     async def test_successful_task_sends_result(self):
+@@ -263,7 +265,8 @@ class TestRunBackgroundTask:
+         mock_adapter.send.assert_called_once()
+         call_args = mock_adapter.send.call_args
+         content = call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "")
+-        assert "Background task complete" in content
++        assert "后台任务已完成" in content
++        assert "Background task complete" not in content
+         assert "Hello from background!" in content
+         mock_agent_instance.shutdown_memory_provider.assert_called_once()
+         mock_agent_instance.close.assert_called_once()
+@@ -369,7 +372,8 @@ class TestRunBackgroundTask:
+         mock_adapter.send.assert_called_once()
+         call_args = mock_adapter.send.call_args
+         content = call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "")
+-        assert "failed" in content.lower()
++        assert "后台任务没跑完" in content
++        assert "boom" in content
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git a/tests/gateway/test_email.py b/tests/gateway/test_email.py
+index 78034fe80..35e132dec 100644
+--- a/tests/gateway/test_email.py
++++ b/tests/gateway/test_email.py
+@@ -594,7 +594,7 @@ class TestThreadContext(unittest.TestCase):
+             self.assertFalse(send_call["Subject"].startswith("Re: Re:"))
+ 
+     def test_no_thread_context_uses_default_subject(self):
+-        """Without thread context, subject should be 'Re: Hermes Agent'."""
++        """Without thread context, subject should use the friendly persona name."""
+         adapter = self._make_adapter()
+ 
+         with patch("smtplib.SMTP") as mock_smtp:
+@@ -604,7 +604,7 @@ class TestThreadContext(unittest.TestCase):
+             adapter._send_email("newuser@test.com", "Hello!", None)
+ 
+             send_call = mock_server.send_message.call_args[0][0]
+-            self.assertEqual(send_call["Subject"], "Re: Hermes Agent")
++            self.assertEqual(send_call["Subject"], "Re: Hermes")
+             self.assertIn("Date", send_call)
+ 
+ 
+@@ -977,7 +977,7 @@ class TestSendEmailStandalone(unittest.TestCase):
+             _, kwargs = mock_server.starttls.call_args
+             self.assertIsInstance(kwargs["context"], ssl.SSLContext)
+             send_call = mock_server.send_message.call_args[0][0]
+-            self.assertEqual(send_call["Subject"], "Hermes Agent")
++            self.assertEqual(send_call["Subject"], "Hermes")
+             self.assertIn("Date", send_call)
+             self.assertEqual(send_call["To"], "user@test.com")
+             self.assertEqual(send_call["From"], "hermes@test.com")
+diff --git a/tests/gateway/test_feishu_approval_buttons.py b/tests/gateway/test_feishu_approval_buttons.py
+index 8af56913c..073d70767 100644
+--- a/tests/gateway/test_feishu_approval_buttons.py
++++ b/tests/gateway/test_feishu_approval_buttons.py
+@@ -117,8 +117,9 @@ class TestFeishuExecApproval:
+         # Verify card payload contains the command and buttons
+         card = json.loads(kwargs["payload"])
+         assert card["header"]["template"] == "orange"
++        assert "命令需要审批" in card["header"]["title"]["content"]
+         assert "rm -rf /important" in card["elements"][0]["content"]
+-        assert "dangerous deletion" in card["elements"][0]["content"]
++        assert "风险" in card["elements"][0]["content"]
+ 
+         # Check buttons
+         actions = card["elements"][1]["actions"]
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+new file mode 100644
+index 000000000..a4b293539
+--- /dev/null
++++ b/tests/gateway/test_friendly_messages.py
+@@ -0,0 +1,177 @@
++"""Regression tests for gateway friendly-message contracts."""
++
++from gateway.friendly_messages import (
++    parse_approval_reply,
++    render_ack,
++    render_capabilities,
++    render_background_failure,
++    render_background_result,
++    render_approval_request,
++    render_busy_ack,
++    render_digest_report,
++    render_greeting,
++    render_inactivity_timeout,
++    render_persona_reply,
++    render_simple_done,
++    render_simple_failure,
++    render_starting,
++    render_plain_table,
++    render_task_progress,
++    render_update_result,
++    render_welcome,
++)
++
++
++def test_approval_request_uses_friendly_template():
++    text = render_approval_request(
++        "python3 -c \"print('hello')\"",
++        "agent:main:weixin:dm:wxid_user",
++        "script execution via -e/-c flag",
++    )
++
++    assert "命令需要审批" in text
++    assert "执行临时代码片段" in text
++    assert "【可选操作】" in text
++    assert "01｜批准本次" in text
++    assert "03｜永久允许" in text
++    assert "Dangerous command requires approval" not in text
++    assert "script execution via" not in text
++
++
++def test_welcome_and_capabilities_use_persona_name():
++    cfg = {"friendly": {"persona": {"display_name": "小舟"}}}
++
++    welcome = render_welcome(cfg)
++    capabilities = render_capabilities(cfg)
++
++    assert "我是「小舟」，你的随身执行伙伴 😊～" in welcome
++    assert "我是「小舟」，我可以帮你做这些 😊～" in capabilities
++    assert "AI 助手" not in welcome
++    assert "Hermes Agent" not in welcome
++    assert "查天气" in capabilities
++    assert "固定格式" in capabilities
++    assert "✨" in welcome
++    assert "✨" in capabilities
++
++
++def test_light_chat_templates_are_warm_friendly():
++    cfg = {"friendly": {"persona": {"display_name": "贾维斯"}}}
++
++    greeting = render_greeting(cfg)
++    ack = render_ack(cfg)
++    starting = render_starting("先看一下当前状态", cfg)
++    done = render_simple_done()
++    failure = render_simple_failure("RuntimeError: Traceback boom")
++
++    assert "我在，贾维斯在线 😊～" in greeting
++    assert "告诉我就行 ✨" in greeting
++    assert ack == "收到，贾维斯来处理 😊"
++    assert starting == "我来处理，先看一下当前状态 🔎"
++    assert "处理好了 🌿" in done
++    assert "这轮没跑完 ⚠️" in failure
++    assert "RuntimeError" not in failure
++    assert "Traceback" not in failure
++
++
++def test_persona_reply_handles_identity_and_capability_queries():
++    cfg = {"friendly": {"persona": {"display_name": "小舟"}}}
++
++    assert "小舟在线" in render_persona_reply("你好", cfg)
++    assert "小舟在线" in render_persona_reply("小舟", cfg)
++    assert "我是「小舟」" in render_persona_reply("你是谁？", cfg)
++    assert "我可以帮你做这些" in render_persona_reply("你能干嘛", cfg)
++    assert render_persona_reply("帮我查天气", cfg) is None
++
++
++def test_digest_report_uses_plain_divider_not_markdown_table():
++    table = render_plain_table(
++        ["时间", "任务", "状态"],
++        [["22:00", "每周 Cron 治理复盘", "待运行/待发送"]],
++    )
++    report = render_digest_report(
++        "⚠️ 当前处理受阻",
++        headline="🕙 截至 2026-05-17 21:24，今天还没发的只剩 1 个明确任务",
++        sections=[
++            {
++                "title": "📌 今晚还未到点",
++                "headers": ["时间", "任务", "状态"],
++                "rows": [["22:00", "每周 Cron 治理复盘", "待运行/待发送"]],
++            },
++            {
++                "title": "🟢 刚才已补上/已运行",
++                "bullets": ["Cron Guard：21:20 ok"],
++            },
++        ],
++        next_step="你现在不用处理；如果要补跑，直接告诉我。",
++    )
++
++    assert "────────────────────────────────────────" in table
++    assert "────────────────────────────────────────" in report
++    assert "|---|" not in report
++    assert "| 时间 |" not in report
++    assert "🧭 下一步" in report
++    assert "Cron Guard：21:20 ok" in report
++
++
++def test_background_and_update_results_use_friendly_cards():
++    background = render_background_result("整理今日任务", "已完成整理。")
++    failure = render_background_failure("task-1", "RuntimeError: Traceback boom")
++    update_ok = render_update_result(True)
++    update_fail = render_update_result(False, "HTTP 502 ret=-2", exit_code=1)
++
++    assert "🌿 后台任务已完成" in background
++    assert "任务｜整理今日任务" in background
++    assert "⚠️ 后台任务没跑完｜task-1" in failure
++    assert "RuntimeError" not in failure
++    assert "Traceback" not in failure
++    assert "🌿 Hermes 更新已完成" in update_ok
++    assert "⚠️ Hermes 更新没完成" in update_fail
++    assert "HTTP 502" not in update_fail
++    assert "ret=-2" not in update_fail
++    assert "Background task complete" not in background
++    assert "Hermes update finished" not in update_ok
++
++
++def test_parse_approval_reply_accepts_explicit_friendly_choices():
++    assert parse_approval_reply("01｜批准本次") == "once"
++    assert parse_approval_reply("本会话允许") == "session"
++    assert parse_approval_reply("永久允许") == "always"
++    assert parse_approval_reply("04 拒绝") == "deny"
++    assert parse_approval_reply("yes") is None
++    assert parse_approval_reply("/approve always") is None
++
++
++def test_progress_template_hides_internal_activity():
++    text = render_task_progress(
++        3,
++        {
++            "api_call_count": 16,
++            "max_iterations": 90,
++            "last_activity_desc": "receiving stream response",
++            "current_tool": None,
++        },
++    )
++
++    assert "任务仍在处理中" in text
++    assert "正在等待模型输出" in text
++    assert "iteration" not in text
++    assert "16/90" not in text
++    assert "receiving stream response" not in text
++
++
++def test_busy_and_timeout_templates_hide_internal_activity():
++    summary = {
++        "api_call_count": 16,
++        "max_iterations": 90,
++        "last_activity_desc": "receiving stream response",
++        "current_tool": None,
++    }
++
++    busy = render_busy_ack("queue", summary, elapsed_mins=2)
++    timeout = render_inactivity_timeout(30, summary)
++
++    for text in (busy, timeout):
++        assert "【状态】" in text
++        assert "iteration" not in text
++        assert "16/90" not in text
++        assert "receiving stream response" not in text
+diff --git a/tests/gateway/test_homeassistant.py b/tests/gateway/test_homeassistant.py
+index b4ff5d8a3..3adaf2e8f 100644
+--- a/tests/gateway/test_homeassistant.py
++++ b/tests/gateway/test_homeassistant.py
+@@ -514,7 +514,7 @@ class TestSendViaRestApi:
+         # Verify the REST API was called with correct payload
+         call_args = mock_session.post.call_args
+         assert "/api/services/persistent_notification/create" in call_args[0][0]
+-        assert call_args[1]["json"]["title"] == "Hermes Agent"
++        assert call_args[1]["json"]["title"] == "Hermes"
+         assert call_args[1]["json"]["message"] == "Test notification"
+         assert "Bearer tok" in call_args[1]["headers"]["Authorization"]
+ 
+diff --git a/tests/gateway/test_matrix_exec_approval.py b/tests/gateway/test_matrix_exec_approval.py
+index a7afe912c..030e9d864 100644
+--- a/tests/gateway/test_matrix_exec_approval.py
++++ b/tests/gateway/test_matrix_exec_approval.py
+@@ -29,7 +29,7 @@ class TestMatrixExecApprovalReactions:
+         assert adapter._approval_prompts_by_event["$evt1"].session_key == "sess-1"
+         assert adapter._send_reaction.await_count == 2
+         emojis = [call.args[2] for call in adapter._send_reaction.await_args_list]
+-        assert emojis == ["✅", "❎"]
++        assert emojis == ["🟢", "🔕"]
+ 
+     @pytest.mark.asyncio
+     async def test_reaction_resolves_pending_approval(self, monkeypatch):
+@@ -44,7 +44,7 @@ class TestMatrixExecApprovalReactions:
+         )
+         adapter._approval_prompt_by_session["sess-1"] = "$target"
+ 
+-        content = {"m.relates_to": {"event_id": "$target", "key": "✅"}}
++        content = {"m.relates_to": {"event_id": "$target", "key": "🟢"}}
+         event = types.SimpleNamespace(
+             sender="@liizfq:liizfq.top",
+             event_id="$react1",
+diff --git a/tests/gateway/test_qqbot.py b/tests/gateway/test_qqbot.py
+index 5d5cac54b..927cab9a0 100644
+--- a/tests/gateway/test_qqbot.py
++++ b/tests/gateway/test_qqbot.py
+@@ -1105,7 +1105,7 @@ class TestBuildApprovalText:
+             timeout_sec=60,
+         )
+         text = build_approval_text(req)
+-        assert "命令执行审批" in text
++        assert "命令需要审批" in text
+         assert "rm -rf /tmp/demo" in text
+         assert "/home/user" in text
+         assert "60" in text
+diff --git a/tests/gateway/test_slack_approval_buttons.py b/tests/gateway/test_slack_approval_buttons.py
+index bc12d0072..a40e51803 100644
+--- a/tests/gateway/test_slack_approval_buttons.py
++++ b/tests/gateway/test_slack_approval_buttons.py
+@@ -90,7 +90,8 @@ class TestSlackExecApproval:
+         assert len(blocks) == 2
+         assert blocks[0]["type"] == "section"
+         assert "rm -rf /important" in blocks[0]["text"]["text"]
+-        assert "dangerous deletion" in blocks[0]["text"]["text"]
++        assert "命令需要审批" in blocks[0]["text"]["text"]
++        assert "风险" in blocks[0]["text"]["text"]
+         assert blocks[1]["type"] == "actions"
+         elements = blocks[1]["elements"]
+         assert len(elements) == 4
+diff --git a/tests/gateway/test_telegram_approval_buttons.py b/tests/gateway/test_telegram_approval_buttons.py
+index f439d9725..31cdde179 100644
+--- a/tests/gateway/test_telegram_approval_buttons.py
++++ b/tests/gateway/test_telegram_approval_buttons.py
+@@ -103,7 +103,8 @@ class TestTelegramExecApproval:
+         kwargs = adapter._bot.send_message.call_args[1]
+         assert kwargs["chat_id"] == 12345
+         assert "rm -rf /important" in kwargs["text"]
+-        assert "dangerous deletion" in kwargs["text"]
++        assert "命令需要审批" in kwargs["text"]
++        assert "风险" in kwargs["text"]
+         assert kwargs["reply_markup"] is not None  # InlineKeyboardMarkup
+ 
+     @pytest.mark.asyncio
+diff --git a/tests/gateway/test_telegram_topic_mode.py b/tests/gateway/test_telegram_topic_mode.py
+index eeec25099..025b6a970 100644
+--- a/tests/gateway/test_telegram_topic_mode.py
++++ b/tests/gateway/test_telegram_topic_mode.py
+@@ -173,7 +173,8 @@ async def test_root_telegram_dm_prompt_is_system_lobby_when_topic_mode_enabled(m
+ 
+     result = await runner._handle_message(_make_event("hello from root"))
+ 
+-    assert "main chat is reserved for system commands" in result
++    assert "Telegram 主入口" in result
++    assert "当前只处理系统命令" in result
+     assert "All Messages" in result
+     runner._run_agent.assert_not_called()
+     runner.session_store.get_or_create_session.assert_not_called()
+@@ -195,9 +196,9 @@ async def test_root_telegram_dm_new_shows_create_topic_instruction(monkeypatch):
+ 
+     result = await runner._handle_message(_make_event("/new"))
+ 
+-    assert "create a new topic" in result
++    assert "开启并行会话" in result
+     assert "All Messages" in result
+-    assert "Use /new inside" in result
++    assert "/new 在已有话题内只会重置当前话题" in result
+     runner._run_agent.assert_not_called()
+     runner.session_store.reset_session.assert_not_called()
+     runner.session_store.get_or_create_session.assert_not_called()
+@@ -339,8 +340,8 @@ async def test_group_new_keeps_existing_reset_semantics_when_dm_topic_mode_enabl
+ 
+     result = await runner._handle_message(_make_group_event("/new", thread_id="555"))
+ 
+-    assert "Started a new Hermes session in this topic" not in result
+-    assert "parallel work" not in result
++    assert "已在当前话题开启新会话" not in result
++    assert "All Messages" not in result
+     runner.session_store.reset_session.assert_called_once_with(group_key)
+ 
+ 
+@@ -380,8 +381,8 @@ async def test_new_inside_telegram_topic_resets_current_topic_with_parallel_tip(
+ 
+     result = await runner._handle_message(_make_event("/new", thread_id="17585"))
+ 
+-    assert "Started a new Hermes session in this topic" in result
+-    assert "parallel work" in result
++    assert "已在当前话题开启新会话" in result
++    assert "并行处理另一件事" in result
+     assert "All Messages" in result
+     runner.session_store.reset_session.assert_called_once_with(topic_key)
+ 
+@@ -473,7 +474,8 @@ async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp
+ 
+     lobby_result = await runner._handle_message(_make_event("hello after activation"))
+ 
+-    assert "main chat is reserved for system commands" in lobby_result
++    assert "Telegram 主入口" in lobby_result
++    assert "当前只处理系统命令" in lobby_result
+     runner._run_agent.assert_not_called()
+ 
+ 
+diff --git a/tests/gateway/test_unknown_command.py b/tests/gateway/test_unknown_command.py
+index 114134496..a98f5cd2c 100644
+--- a/tests/gateway/test_unknown_command.py
++++ b/tests/gateway/test_unknown_command.py
+@@ -101,7 +101,7 @@ async def test_unknown_slash_command_returns_guidance(monkeypatch):
+     result = await runner._handle_message(_make_event("/definitely-not-a-command"))
+ 
+     assert result is not None
+-    assert "Unknown command" in result
++    assert "没找到这个命令" in result
+     assert "/definitely-not-a-command" in result
+     assert "/commands" in result
+     runner._run_agent.assert_not_called()
+@@ -127,11 +127,74 @@ async def test_unknown_slash_command_underscored_form_also_guarded(monkeypatch):
+     result = await runner._handle_message(_make_event("/made_up_thing"))
+ 
+     assert result is not None
+-    assert "Unknown command" in result
++    assert "没找到这个命令" in result
+     assert "/made_up_thing" in result
+     runner._run_agent.assert_not_called()
+ 
+ 
++@pytest.mark.asyncio
++async def test_persona_greeting_query_short_circuits_agent(monkeypatch):
++    import gateway.run as gateway_run
++
++    runner = _make_runner()
++    runner._run_agent = AsyncMock(
++        side_effect=AssertionError("greeting query leaked through to the agent")
++    )
++
++    monkeypatch.setattr(
++        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
++    )
++
++    result = await runner._handle_message(_make_event("你好"))
++
++    assert result is not None
++    assert "我在，Hermes在线 😊～" in result
++    assert "告诉我就行 ✨" in result
++    runner._run_agent.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_persona_identity_query_short_circuits_agent(monkeypatch):
++    import gateway.run as gateway_run
++
++    runner = _make_runner()
++    runner._run_agent = AsyncMock(
++        side_effect=AssertionError("persona query leaked through to the agent")
++    )
++
++    monkeypatch.setattr(
++        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
++    )
++
++    result = await runner._handle_message(_make_event("你是谁？"))
++
++    assert result is not None
++    assert "我是「Hermes」，你的随身执行伙伴 😊～" in result
++    assert "Hermes Agent" not in result
++    runner._run_agent.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_persona_capability_query_short_circuits_agent(monkeypatch):
++    import gateway.run as gateway_run
++
++    runner = _make_runner()
++    runner._run_agent = AsyncMock(
++        side_effect=AssertionError("capability query leaked through to the agent")
++    )
++
++    monkeypatch.setattr(
++        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
++    )
++
++    result = await runner._handle_message(_make_event("你能干嘛"))
++
++    assert result is not None
++    assert "我可以帮你做这些" in result
++    assert "查天气" in result
++    runner._run_agent.assert_not_called()
++
++
+ @pytest.mark.asyncio
+ async def test_known_slash_command_not_flagged_as_unknown(monkeypatch):
+     """A real built-in like /status must NOT hit the unknown-command guard."""
+diff --git a/tests/gateway/test_weixin.py b/tests/gateway/test_weixin.py
+index 64258f7a2..1e5dc5457 100644
+--- a/tests/gateway/test_weixin.py
++++ b/tests/gateway/test_weixin.py
+@@ -411,6 +411,27 @@ class TestWeixinChunkDelivery:
+         assert first_try["text"] == retry["text"]
+         assert first_try["client_id"] == retry["client_id"]
+ 
++    @patch("gateway.platforms.weixin._send_message", new_callable=AsyncMock)
++    def test_send_exec_approval_uses_friendly_text_card(self, send_message_mock):
++        adapter = self._connected_adapter()
++
++        result = asyncio.run(
++            adapter.send_exec_approval(
++                "wxid_test123",
++                "python3 -c \"print('hello')\"",
++                "agent:main:weixin:dm:wxid_test123",
++                "script execution via -e/-c flag",
++            )
++        )
++
++        assert result.success is True
++        sent_text = send_message_mock.await_args.kwargs["text"]
++        assert "命令需要审批" in sent_text
++        assert "【可选操作】" in sent_text
++        assert "批准本次" in sent_text
++        assert "永久允许" in sent_text
++        assert "Dangerous command requires approval" not in sent_text
++
+ 
+ class TestWeixinOutboundMedia:
+     def test_send_image_file_accepts_keyword_image_path(self):
+diff --git a/tools/send_message_tool.py b/tools/send_message_tool.py
+index 2fa744002..7c4d5cafe 100644
+--- a/tools/send_message_tool.py
++++ b/tools/send_message_tool.py
+@@ -1453,7 +1453,9 @@ async def _send_email(extra, chat_id, message):
+         msg = MIMEText(message, "plain", "utf-8")
+         msg["From"] = address
+         msg["To"] = chat_id
+-        msg["Subject"] = "Hermes Agent"
++        from gateway.friendly_messages import get_persona
++
++        msg["Subject"] = get_persona().display_name
+         msg["Date"] = formatdate(localtime=True)
+ 
+         server = smtplib.SMTP(smtp_host, smtp_port)

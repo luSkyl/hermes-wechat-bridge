@@ -4,6 +4,12 @@ All notable changes to Hermes WeChat Bridge will be documented in this file.
 
 The format follows the spirit of Keep a Changelog, and this project uses semantic versioning once public releases begin.
 
+## [Unreleased]
+
+### Added
+
+- Added Hermes Core distribution patches for persona-aware friendly gateway templates, cron/background friendly output, approval prompt copy, and local profile vault backups.
+
 ## [0.1.0] - 2026-05-19
 
 ### Added
