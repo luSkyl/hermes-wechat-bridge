@@ -1,0 +1,7 @@
+ hermes_cli/config.py               |  29 +++
+ hermes_cli/main.py                 |  15 ++
+ hermes_cli/profile_distribution.py |   9 +
+ hermes_cli/uninstall.py            |  36 ++-
+ hermes_cli/vault_guard.py          | 461 +++++++++++++++++++++++++++++++++++++
+ hermes_constants.py                |  14 +-
+ 6 files changed, 559 insertions(+), 5 deletions(-)

@@ -29,6 +29,22 @@ if ($status -and -not $AllowDirty) {
     throw "Core checkout is not clean. Use -AllowDirty only for disposable integration worktrees."
 }
 
+if ($CheckOnly) {
+    $tempCore = Join-Path ([System.IO.Path]::GetTempPath()) ("hermes-core-patch-check-" + [guid]::NewGuid().ToString('N'))
+    try {
+        Write-Host "==> Creating temporary patch-check worktree"
+        & git -C $core worktree add --detach $tempCore HEAD | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Could not create temporary core worktree: $tempCore" }
+        & $PSCommandPath -CoreRoot $tempCore -PatchRoot $patches -AllowDirty
+        if ($LASTEXITCODE -ne 0) { throw "Core patch check failed in temporary worktree: $tempCore" }
+    } finally {
+        & git -C $core worktree remove --force $tempCore *> $null
+        if (Test-Path -LiteralPath $tempCore) { Remove-Item -LiteralPath $tempCore -Recurse -Force }
+    }
+    Write-Host "Core patch gate passed. check_only=True"
+    return
+}
+
 foreach ($patch in $patchFiles) {
     Write-Host "==> Checking $($patch.Name)"
     & git -C $core apply --check --whitespace=nowarn $patch.FullName
