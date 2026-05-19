@@ -1,6 +1,6 @@
-﻿# Roadmap
+# Roadmap
 
-## v0.1: Bridge and Distribution Foundation
+## v0.1: Bridge and Distribution Foundation - Released
 
 - Stable Hermes to WeChat bridge MVP.
 - WeChat callback verification, XML/JSON parsing, and dry-run delivery.
@@ -13,7 +13,7 @@
 - `v0.1.0-alpha.4`: first release that positions the repository as both Bridge package and Distribution Kit.
 - `v0.1.0-alpha.5`: clean-directory distribution verification and installer hardening.
 - `v0.1.0-alpha.6`: full install, verify, start, stop, and rollback gates pass without private local state.
-- `v0.1.0-rc.1`: release candidate after a fresh Windows workspace reproduction.
+- `v0.1.0`: first stable GitHub release for the Bridge package and Distribution Kit.
 
 ## v0.2: Production Hardening
 

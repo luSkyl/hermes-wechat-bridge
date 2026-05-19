@@ -30,10 +30,57 @@ jobs:
         run: python -m build
       - name: Check package
         run: python -m twine check dist/*
+      - name: Build distribution bundle
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          asset_dir = Path("release-assets")
+          asset_dir.mkdir(exist_ok=True)
+          archive = asset_dir / f"hermes-wechat-distribution-{tag}.zip"
+          include_roots = [
+              "bridge",
+              "distribution",
+              "docs",
+              "examples",
+              "schemas",
+              "scripts",
+              "simulator",
+              "tests",
+          ]
+          include_files = [
+              "README.md",
+              "CHANGELOG.md",
+              "RELEASE.md",
+              "ROADMAP.md",
+              "LICENSE",
+              "pyproject.toml",
+          ]
+          skip_parts = {".git", ".pytest_cache", ".ruff_cache", "__pycache__", "dist", "build"}
+          with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+              for filename in include_files:
+                  path = Path(filename)
+                  if path.exists():
+                      zf.write(path, path.as_posix())
+              for root_name in include_roots:
+                  root = Path(root_name)
+                  if not root.exists():
+                      continue
+                  for path in root.rglob("*"):
+                      if path.is_dir() or any(part in skip_parts for part in path.parts):
+                          continue
+                      zf.write(path, path.as_posix())
+          print(f"created {archive}")
+          PY
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
+          files: |
+            dist/*
+            release-assets/*
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 

@@ -1,4 +1,4 @@
-﻿# Hermes WeChat Bridge & Distribution Kit
+# Hermes WeChat Bridge & Distribution Kit
 
 [![CI](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/luSkyl/hermes-wechat-bridge/actions/workflows/codeql.yml)
@@ -80,7 +80,7 @@ Current locked combination:
 |---|---|
 | Hermes Core | `v2026.5.16` |
 | Hermes Web UI | official `0.5.28` + local overlay -> `0.5.28-local.1` |
-| Hermes WeChat Bridge | `0.1.0a4` / planned tag `v0.1.0-alpha.4` |
+| Hermes WeChat Bridge | `0.1.0` / tag `v0.1.0` |
 
 ## Architecture
 
@@ -112,6 +112,4 @@ Use `distribution/config.example.yaml` as a template and keep real credentials o
 
 ## Release Status
 
-The project is still alpha. `v0.1.0-alpha.4` is the first release line that treats this repository as both a bridge package and a distribution kit.
-
-Before a stable `v0.1.0`, the full distribution must pass a clean-directory install, runtime verification, and rollback test without relying on private local state.
+The project has reached the first stable `v0.1.0` GitHub release for the Bridge package and Distribution Kit. PyPI publishing remains gated by repository configuration and trusted publishing setup.

@@ -1,4 +1,4 @@
-﻿# Release Process
+# Release Process
 
 Use this process for public releases.
 
@@ -18,6 +18,7 @@ Hermes WeChat Bridge publishes GitHub Releases on every `v*.*.*` tag. Tags that 
 - [ ] README.md quickstart still matches behavior.
 - [ ] distribution/scripts/verify.ps1 passes against an existing Hermes workspace.
 - [ ] Distribution manifest and patch/overlay hashes are current.
+- [ ] GitHub Release includes wheel, sdist, and distribution zip assets.
 
 ## Tagging
 
@@ -26,8 +27,8 @@ Hermes WeChat Bridge publishes GitHub Releases on every `v*.*.*` tag. Tags that 
 Use prerelease tags while the public contract is still being validated:
 
 ```powershell
-git tag -a v0.1.0-alpha.4 -m "v0.1.0-alpha.4"
-git push origin v0.1.0-alpha.4
+git tag -a v0.1.1-alpha.1 -m "v0.1.1-alpha.1"
+git push origin v0.1.1-alpha.1
 ```
 
 Prerelease tags create GitHub prereleases with wheel and source distribution assets, but they do not publish to PyPI.
@@ -41,7 +42,7 @@ git push origin v0.1.0
 
 ## Publishing
 
-The release workflow always builds distribution artifacts and attaches them to GitHub Releases.
+The release workflow always builds Python distribution artifacts plus a `hermes-wechat-distribution-<tag>.zip` bundle and attaches them to GitHub Releases.
 
 PyPI publishing is intentionally gated and uses trusted publishing only. It runs only when all of these are true:
 
