@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 from bridge.protocol import Attachment, MessageEvent, MessageKind, VerificationError
@@ -70,10 +72,16 @@ class WeChatAdapter:
 
 
 def _stable_event_id(payload: dict[str, Any]) -> str:
-    sender = str(payload.get("FromUserName") or payload.get("sender_id") or "unknown")
-    created = str(payload.get("CreateTime") or payload.get("timestamp") or "0")
-    content = str(payload.get("Content") or payload.get("text") or "")
-    return f"wechat:{sender}:{created}:{abs(hash(content))}"
+    normalized = {
+        "from": str(payload.get("FromUserName") or payload.get("sender_id") or "unknown"),
+        "to": str(payload.get("ToUserName") or payload.get("conversation_id") or "wechat"),
+        "created": str(payload.get("CreateTime") or payload.get("timestamp") or "0"),
+        "msg_type": str(payload.get("MsgType") or payload.get("msg_type") or "text").lower(),
+        "media_id": str(payload.get("MediaId") or payload.get("media_id") or ""),
+        "content": str(payload.get("Content") or payload.get("text") or ""),
+    }
+    digest = hashlib.sha256(json.dumps(normalized, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"wechat:{digest[:32]}"
 
 
 def _optional_int(value: Any) -> int | None:

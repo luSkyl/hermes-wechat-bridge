@@ -24,7 +24,9 @@ hermes:
 
 runtime:
   dedupe_ttl_seconds: 300
+  dedupe_state_dir: ./.bridge-state/dedupe
   retry_attempts: 2
   retry_backoff_seconds: 0.1
   request_timeout_seconds: 20
   service_api_token: change-me-local-admin-token
+  allow_unsigned_webhook: false

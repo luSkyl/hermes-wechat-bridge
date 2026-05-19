@@ -38,10 +38,14 @@ class GatewayRouter:
         self.config = config
         self.hermes = hermes
         self.sender = sender
-        self.dedupe = DedupeStore(ttl_seconds=config.runtime.dedupe_ttl_seconds)
+        self.dedupe = DedupeStore(
+            ttl_seconds=config.runtime.dedupe_ttl_seconds,
+            state_dir=config.runtime.dedupe_state_dir,
+        )
 
     def handle_event(self, event: MessageEvent) -> RouteResult:
-        if self.dedupe.seen(event.event_id):
+        claim = self.dedupe.begin(event.event_id)
+        if claim.duplicate:
             return RouteResult(
                 status="duplicate",
                 event_id=event.event_id,
@@ -50,34 +54,46 @@ class GatewayRouter:
                 delivery=None,
             )
 
-        session = SessionRef.from_message(event.platform, event.conversation_id, event.sender_id)
-        hermes_response = self.hermes.send_message(event, session)
-        reply_text = format_friendly_reply(hermes_response, max_chars=self.config.wechat.max_reply_chars)
-        delivery_request = DeliveryRequest(
-            conversation_id=event.conversation_id,
-            recipient_id=event.sender_id,
-            text=reply_text,
-            reply_to=event.reply_to,
-            metadata={"event_id": event.event_id, "session_id": session.session_id},
-        )
-
-        delivery_result, attempts = retry_call(
-            lambda: self.sender.send(delivery_request),
-            attempts=self.config.runtime.retry_attempts,
-            backoff_seconds=self.config.runtime.retry_backoff_seconds,
-        )
-        if delivery_result.attempts != attempts:
-            delivery_result = DeliveryResult(
-                ok=delivery_result.ok,
-                delivery_id=delivery_result.delivery_id,
-                error=delivery_result.error,
-                attempts=attempts,
-                metadata=delivery_result.metadata,
+        try:
+            session = SessionRef.from_message(event.platform, event.conversation_id, event.sender_id)
+            hermes_response = self.hermes.send_message(event, session)
+            reply_text = format_friendly_reply(
+                hermes_response, max_chars=self.config.wechat.max_reply_chars, source_text=event.prompt_text()
             )
-        return RouteResult(
-            status="delivered" if delivery_result.ok else "delivery_failed",
-            event_id=event.event_id,
-            session_id=session.session_id,
-            reply_text=reply_text,
-            delivery=delivery_result,
-        )
+            delivery_request = DeliveryRequest(
+                conversation_id=event.conversation_id,
+                recipient_id=event.sender_id,
+                text=reply_text,
+                reply_to=event.reply_to,
+                metadata={"event_id": event.event_id, "session_id": session.session_id},
+            )
+
+            delivery_result, attempts = retry_call(
+                lambda: self.sender.send(delivery_request),
+                attempts=self.config.runtime.retry_attempts,
+                backoff_seconds=self.config.runtime.retry_backoff_seconds,
+            )
+            if delivery_result.attempts != attempts:
+                delivery_result = DeliveryResult(
+                    ok=delivery_result.ok,
+                    delivery_id=delivery_result.delivery_id,
+                    error=delivery_result.error,
+                    attempts=attempts,
+                    metadata=delivery_result.metadata,
+                )
+            if delivery_result.ok:
+                self.dedupe.complete(event.event_id)
+            else:
+                self.dedupe.fail(event.event_id, delivery_result.error)
+            return RouteResult(
+                status="delivered" if delivery_result.ok else "delivery_failed",
+                event_id=event.event_id,
+                session_id=session.session_id,
+                reply_text=reply_text,
+                delivery=delivery_result,
+            )
+        except Exception as error:
+            self.dedupe.fail(event.event_id, str(error))
+            raise
+
+

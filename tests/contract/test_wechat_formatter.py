@@ -1,0 +1,84 @@
+﻿"""Formatter contract tests."""
+
+from __future__ import annotations
+
+from bridge.hermes import HermesClient
+from bridge.protocol import HermesResponse
+from bridge.runtime.config import BridgeConfig, HermesConfig, RuntimeConfig, WeChatConfig
+from bridge.runtime.router import GatewayRouter
+from bridge.wechat import WeChatAdapter, WeChatSender
+from bridge.wechat.formatter import format_friendly_reply, format_processing_notice
+
+
+def _config(tmp_path) -> BridgeConfig:
+    return BridgeConfig(
+        name="test",
+        environment="test",
+        hermes=HermesConfig(mode="mock"),
+        wechat=WeChatConfig(token="test-token", dry_run=True, governor_state_dir=str(tmp_path)),
+        runtime=RuntimeConfig(),
+    )
+
+
+def test_friendly_reply_uses_card_layout_for_normal_text() -> None:
+    response = HermesResponse(text="先做结论\n然后补充原因\n最后给下一步", session_id="s-1")
+
+    text = format_friendly_reply(response)
+
+    assert text.startswith("📍 先说结论")
+    assert "────────────────────────" in text
+    assert "我是「贾维斯」，你的随身执行伙伴" in text
+    assert "✨ 重点细节" in text
+    assert "🌿 接下来" in text
+    assert "先做结论" in text
+
+
+def test_friendly_reply_truncates_long_text() -> None:
+    response = HermesResponse(text="A" * 4000, session_id="s-1")
+
+    text = format_friendly_reply(response, max_chars=200)
+
+    assert len(text) <= 200
+    assert "…内容较长" in text
+
+
+def test_friendly_reply_avoids_smiley_style_for_urgent_context() -> None:
+    response = HermesResponse(text="请尽快撤离，附近有地震和余震风险", session_id="s-1")
+
+    text = format_friendly_reply(response, source_text="现在在地震区，请优先给安全建议")
+
+    assert text.startswith("⚠️ 先确认安全")
+    assert "😊" not in text
+    assert "😄" not in text
+    assert "安全优先" in text or "现场权威指引" in text
+
+
+def test_processing_notice_uses_friendly_card() -> None:
+    text = format_processing_notice()
+
+    assert text.startswith("🧭 已收到")
+    assert "我是「贾维斯」" in text
+    assert "稍等一下" in text
+
+
+def test_router_formats_reply_with_source_context(tmp_path) -> None:
+    config = _config(tmp_path)
+    sender = WeChatSender(config.wechat)
+    router = GatewayRouter(config=config, hermes=HermesClient(config.hermes), sender=sender)
+    adapter = WeChatAdapter(config.wechat)
+    message = adapter.normalize(
+        {
+            "MsgId": "formatter-card-1",
+            "MsgType": "text",
+            "FromUserName": "user-1",
+            "ToUserName": "bridge",
+            "Content": "现在在地震区，请给我安全建议",
+        }
+    )
+
+    result = router.handle_event(message)
+
+    assert result.status == "delivered"
+    assert result.reply_text is not None
+    assert result.reply_text.startswith("⚠️ 先确认安全")
+    assert "😊" not in result.reply_text

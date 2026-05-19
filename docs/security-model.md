@@ -9,6 +9,7 @@
 ## Required Controls
 
 - Verify webhook signatures for production traffic.
+- Reject production callbacks that omit `signature`, `timestamp`, or `nonce`; use `/simulate` or the explicit local-only `runtime.allow_unsigned_webhook` switch for unsigned tests.
 - Protect service APIs with `runtime.service_api_token` when binding outside localhost.
 - Keep secrets outside git.
 - Redact tokens, local paths, stack traces, and private config from user-visible replies.

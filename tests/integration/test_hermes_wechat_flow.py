@@ -2,8 +2,11 @@ import io
 import sys
 from pathlib import Path
 
+import pytest
+
 from bridge.cli import _print_json, main
 from bridge.hermes import HermesClient
+from bridge.protocol import HermesResponse
 from bridge.runtime.config import load_config
 from bridge.runtime.router import GatewayRouter
 from bridge.wechat import WeChatAdapter, WeChatSender
@@ -64,6 +67,42 @@ def test_router_deduplicates_replayed_event() -> None:
     assert first.status == "delivered"
     assert second.status == "duplicate"
     assert second.delivery is None
+
+
+def test_router_retries_event_after_hermes_failure() -> None:
+    config = load_config(CONFIG)
+    event = WeChatAdapter(config.wechat).normalize(
+        {
+            "MsgId": "flow-retry-after-failure",
+            "MsgType": "text",
+            "FromUserName": "user-1",
+            "ToUserName": "bridge",
+            "Content": "retry me",
+        }
+    )
+    hermes = _FlakyHermes(config.hermes)
+    router = GatewayRouter(config=config, hermes=hermes, sender=WeChatSender(config.wechat))
+
+    with pytest.raises(RuntimeError, match="temporary hermes failure"):
+        router.handle_event(event)
+    result = router.handle_event(event)
+    duplicate = router.handle_event(event)
+
+    assert result.status == "delivered"
+    assert hermes.calls == 2
+    assert duplicate.status == "duplicate"
+
+
+class _FlakyHermes(HermesClient):
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        self.calls = 0
+
+    def send_message(self, event, session):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("temporary hermes failure")
+        return HermesResponse(text="recovered", session_id=session.session_id)
 
 
 def test_cli_doctor_and_simulate_pass() -> None:

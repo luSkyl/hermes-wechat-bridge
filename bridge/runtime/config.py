@@ -42,10 +42,12 @@ class HermesConfig:
 @dataclass(frozen=True)
 class RuntimeConfig:
     dedupe_ttl_seconds: int = 300
+    dedupe_state_dir: str | None = None
     retry_attempts: int = 2
     retry_backoff_seconds: float = 0.1
     request_timeout_seconds: float = 20.0
     service_api_token: str | None = None
+    allow_unsigned_webhook: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,10 +115,12 @@ def parse_config(data: dict[str, Any]) -> BridgeConfig:
         ),
         runtime=RuntimeConfig(
             dedupe_ttl_seconds=_to_int(runtime_data.get("dedupe_ttl_seconds", 300), 300),
+            dedupe_state_dir=_optional_str(runtime_data.get("dedupe_state_dir")),
             retry_attempts=_to_int(runtime_data.get("retry_attempts", 2), 2),
             retry_backoff_seconds=_to_float(runtime_data.get("retry_backoff_seconds", 0.1), 0.1),
             request_timeout_seconds=_to_float(runtime_data.get("request_timeout_seconds", 20.0), 20.0),
             service_api_token=_optional_str(runtime_data.get("service_api_token")),
+            allow_unsigned_webhook=_to_bool(runtime_data.get("allow_unsigned_webhook", False)),
         ),
     )
 

@@ -107,7 +107,11 @@ def _build_handler(config: BridgeConfig) -> type[BaseHTTPRequestHandler]:
             timestamp = _first(query, "timestamp")
             nonce = _first(query, "nonce")
             try:
-                if signature and timestamp and nonce:
+                if config.runtime.allow_unsigned_webhook:
+                    pass
+                elif not (signature and timestamp and nonce):
+                    raise VerificationError("Missing WeChat signature fields")
+                else:
                     adapter.verify(timestamp=timestamp, nonce=nonce, signature=signature)
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length).decode("utf-8")
