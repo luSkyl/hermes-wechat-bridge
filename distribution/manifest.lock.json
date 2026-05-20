@@ -36,6 +36,11 @@
                 "path": "patches/hermes-core/0004-ordinary-reply-friendly-cards.patch",
                 "sha256": "f0618490711c47c346676752821ac31f9a6aee64e4df681bad08fba5ac93e28f",
                 "description": "Ordinary Hermes replies are rendered through persona-aware friendly cards with long dividers and emergency-safe tone."
+            },
+            {
+                "path": "patches/hermes-core/0005-progress-speed-and-sanitization.patch",
+                "sha256": "dfd88a4ef936950917ccd43a005ab90db1aef9cb8f085d7d9a3ae7307ebb08ee",
+                "description": "Improve long-running progress cards, preserve useful sanitized reply content, and suppress duplicate continue-only busy acknowledgements."
             }
         ]
     },

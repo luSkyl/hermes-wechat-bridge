@@ -1,0 +1,330 @@
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+index 47e369dff..ab6ddeb95 100644
+--- a/gateway/friendly_messages.py
++++ b/gateway/friendly_messages.py
+@@ -70,6 +70,16 @@ INTERNAL_ACTIVITY_MARKERS = (
+     "current_tool",
+ )
+ 
++CONTINUE_QUERIES = {
++    "继续",
++    "继续说",
++    "继续讲",
++    "继续展开",
++    "接着说",
++    "接着讲",
++    "接着",
++}
++
+ 
+ @dataclass(frozen=True)
+ class FriendlyPersona:
+@@ -252,6 +262,11 @@ def render_persona_reply(text: str, config: Mapping[str, Any] | None = None) ->
+     return None
+ 
+ 
++def is_continue_only_reply(text: str) -> bool:
++    normalized = _normalize_persona_query(text)
++    return normalized in CONTINUE_QUERIES
++
++
+ def render_ordinary_reply(text: str, config: Mapping[str, Any] | None = None) -> str:
+     persona = get_persona(config)
+     clean_text = _sanitize_user_visible(text).strip()
+@@ -537,6 +552,21 @@ def render_background_failure(task_id: str, error: str | None) -> str:
+     )
+ 
+ 
++def render_background_review_notice(message: str | None) -> str:
++    summary = _background_review_summary(message)
++    return friendly_card(
++        "\U0001f9e0 \u81ea\u6211\u5347\u7ea7\u5df2\u5b8c\u6210\uff5c\u6211\u66f4\u65b0\u4e86\u5bf9\u4f60\u7684\u4e86\u89e3",
++        action="\u5df2\u5728\u4efb\u52a1\u7ed3\u675f\u540e\u6574\u7406\u672c\u8f6e\u53ef\u590d\u7528\u4fe1\u606f",
++        result=_background_review_result(summary),
++        impact=_background_review_impact(summary),
++        boundary="\u8fd9\u4e0d\u662f\u9519\u8bef\u544a\u8b66\uff1b\u4e0d\u4f1a\u5c55\u793a\u5185\u90e8 review\u3001\u91cd\u8bd5\u65e5\u5fd7\u6216\u82f1\u6587\u72b6\u6001",
++        next_step="\u5982\u679c\u8fd9\u6761\u4e0d\u51c6\u786e\uff0c\u76f4\u63a5\u56de\u590d\u201c\u64a4\u9500\u8fd9\u6761\u504f\u597d\u201d\uff1b\u5982\u679c\u89c9\u5f97\u63d0\u9192\u592a\u591a\uff0c\u544a\u8bc9\u6211\u201c\u5173\u95ed\u81ea\u6211\u5347\u7ea7\u901a\u77e5\u201d\u3002",
++        extra_status=(
++            "\u8bf4\u660e\uff5c\u53ea\u5728\u786e\u5b9e\u5199\u5165\u957f\u671f\u8bb0\u5fc6\u3001\u7528\u6237\u753b\u50cf\u6216\u6280\u80fd\u65f6\u63d0\u9192\uff1b\u666e\u901a\u8fdb\u5ea6\u4e0d\u4f1a\u53d1\u5230\u5fae\u4fe1\u3002",
++        ),
++    )
++
++
+ def render_update_result(success: bool, output: str | None = None, exit_code: int | None = None) -> str:
+     if success:
+         return friendly_card(
+@@ -674,13 +704,107 @@ def _sanitize_user_visible(text: Any) -> str:
+     rendered = str(text or "")
+     lowered = rendered.lower()
+     if any(marker in lowered for marker in RAW_ERROR_MARKERS):
+-        return "内部技术细节已转入本地诊断记录，这里只保留可操作信息。"
++        return _sanitize_raw_error_text(rendered)
+     for marker in INTERNAL_ACTIVITY_MARKERS:
+         if marker in lowered:
+             return _public_activity_label({"last_activity_desc": rendered})
+     return rendered
+ 
+ 
++def _sanitize_raw_error_text(text: str) -> str:
++    lines = [line.strip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
++    kept: list[str] = []
++    hidden = False
++    for line in lines:
++        if not line:
++            continue
++        lowered = line.lower()
++        if any(marker in lowered for marker in RAW_ERROR_MARKERS):
++            hidden = True
++            prefix = _text_before_first_marker(line, RAW_ERROR_MARKERS).strip(" ：:，,。.;；|-—")
++            if prefix and not any(marker in prefix.lower() for marker in RAW_ERROR_MARKERS):
++                kept.append(prefix)
++            continue
++        if re.search(r"\b(?:file|line)\b.*\.(?:py|js|ts|tsx|go|rs)", lowered):
++            hidden = True
++            continue
++        if len(line) > 220:
++            hidden = True
++            line = line[:217].rstrip() + "…"
++        kept.append(line)
++    if kept:
++        body = "\n".join(dict.fromkeys(kept[:6]))
++        if hidden:
++            return f"{body}\n内部技术细节已隐藏，聊天里只保留可操作信息。"
++        return body
++    return "内部技术细节已隐藏；当前没有提取到可靠的可操作结论，我会继续从日志里定位原因。"
++
++
++def _text_before_first_marker(text: str, markers: Sequence[str]) -> str:
++    lowered = str(text or "").lower()
++    positions = [lowered.find(marker) for marker in markers if marker and lowered.find(marker) > 0]
++    if not positions:
++        return ""
++    return str(text or "")[: min(positions)]
++
++
++def _background_review_summary(message: str | None) -> str:
++    text = str(message or "").strip()
++    text = re.sub(r"^\s*[\U0001f4be\U0001f9e0]\s*", "", text)
++    match = re.search(r"self-improvement\s+review\s*:\s*(.+)$", text, flags=re.IGNORECASE)
++    if match:
++        text = match.group(1)
++    text = re.sub(r"\s+", " ", text).strip(" .\u3002")
++    return text or "Background review updated"
++
++
++def _background_review_parts(summary: str) -> list[str]:
++    return [
++        part.strip(" .\u3002")
++        for part in re.split(r"\s*(?:\u00b7|\uff1b|;|\uff0c|,)\s*", str(summary or ""))
++        if part.strip(" .\u3002")
++    ]
++
++
++def _background_review_result(summary: str) -> str:
++    rendered = [_background_review_part_result(part) for part in _background_review_parts(summary)]
++    rendered = list(dict.fromkeys(item for item in rendered if item))
++    if not rendered:
++        return "\u5df2\u66f4\u65b0\u4e00\u6761\u53ef\u590d\u7528\u8bb0\u5f55\u3002"
++    return "\uff1b".join(rendered) + "\u3002"
++
++
++def _background_review_part_result(part: str) -> str:
++    lowered = part.lower()
++    skill_match = re.search(r"skill\s+['\"]([^'\"]+)['\"]", part, flags=re.IGNORECASE)
++    skill_name = skill_match.group(1).strip() if skill_match else ""
++    if "user profile" in lowered or lowered.startswith("user "):
++        return "\u7528\u6237\u753b\u50cf\u5df2\u66f4\u65b0"
++    if "memory" in lowered or "memories" in lowered:
++        return "\u957f\u671f\u8bb0\u5fc6\u5df2\u66f4\u65b0"
++    if "skill" in lowered:
++        if "created" in lowered or "added" in lowered:
++            action = "\u6280\u80fd\u5df2\u65b0\u589e"
++        else:
++            action = "\u6280\u80fd\u5df2\u66f4\u65b0"
++        return f"{action}\uff1a{skill_name}" if skill_name else action
++    if "preference" in lowered or "preferences" in lowered:
++        return "\u957f\u671f\u504f\u597d\u5df2\u66f4\u65b0"
++    safe = _sanitize_user_visible(part)
++    return safe if safe else "\u81ea\u6211\u5347\u7ea7\u8bb0\u5f55\u5df2\u66f4\u65b0"
++
++
++def _background_review_impact(summary: str) -> str:
++    lowered = str(summary or "").lower()
++    if "skill" in lowered:
++        return "\u540e\u7eed\u9047\u5230\u76f8\u540c\u4efb\u52a1\u65f6\uff0c\u6211\u4f1a\u4f18\u5148\u590d\u7528\u8fd9\u6b21\u6c89\u6dc0\u7684\u65b9\u6cd5"
++    if "user profile" in lowered or "preference" in lowered:
++        return "\u540e\u7eed\u56de\u590d\u4f1a\u66f4\u8d34\u5408\u4f60\u7684\u504f\u597d\uff0c\u4f46\u4e0d\u4f1a\u8986\u76d6\u4f60\u7684\u5373\u65f6\u6307\u4ee4"
++    if "memory" in lowered:
++        return "\u540e\u7eed\u76f8\u5173\u4efb\u52a1\u4f1a\u53c2\u8003\u8fd9\u6761\u957f\u671f\u8bb0\u5fc6\uff0c\u51cf\u5c11\u91cd\u590d\u89e3\u91ca"
++    return "\u540e\u7eed\u76f8\u4f3c\u573a\u666f\u4f1a\u53c2\u8003\u8fd9\u6b21\u6c89\u6dc0\uff0c\u4f46\u4f60\u968f\u65f6\u53ef\u4ee5\u7ea0\u6b63"
++
++
+ def command_preview(command: str, limit: int = 1800) -> str:
+     command = str(command or "").strip()
+     if len(command) <= limit:
+@@ -915,15 +1039,59 @@ def public_activity_extra_status(
+     return (f"{label}｜{'；'.join(parts)}",)
+ 
+ 
++def _progress_context(summary: dict[str, Any] | None) -> tuple[str, str, str]:
++    label = _public_activity_label(summary or {})
++    if label == "正在等待模型输出":
++        return (
++            "正在等待模型整理结果",
++            "你的问题已经进入处理流程，当前卡在模型生成最终答复。",
++            "模型响应较慢或正在组织较长答案；我会继续等最终结果。",
++        )
++    if label == "正在检索资料":
++        return (
++            "正在检索和核对资料",
++            "我已经开始查找相关信息，正在确认可用依据。",
++            "检索类任务需要等待搜索或文件读取返回。",
++        )
++    if label == "正在执行命令":
++        return (
++            "正在执行本地命令或工具",
++            "我已经启动了执行步骤，正在等待工具返回结果。",
++            "命令、网络或外部工具可能需要更长时间。",
++        )
++    if label == "正在等待工具返回":
++        return (
++            "正在等待工具返回",
++            "我已经把任务交给工具处理，正在等它返回。",
++            "外部工具返回前不能可靠给出最终结论。",
++        )
++    return (
++        label,
++        "我已经收到你的请求，并在继续推进当前任务。",
++        "当前任务还没有形成可发送的最终结论。",
++    )
++
++
+ def render_task_progress(elapsed_mins: int, activity_summary: dict[str, Any] | None = None) -> str:
+-    return friendly_card(
+-        f"⏳ 任务仍在处理中｜已运行约 {elapsed_mins} 分钟",
+-        action="继续等待后台任务",
+-        result="尚未完成，但仍有活动迹象",
+-        impact="不会重复刷屏，只保留这一次进度提示",
+-        boundary="如果后续无活动，会进入超时保护",
+-        next_step="你可以继续等待，或发送 /reset 取消当前会话。",
+-        extra_status=public_activity_extra_status(activity_summary),
++    stage, completed, reason = _progress_context(activity_summary)
++    return "\n".join(
++        (
++            "⏳ 我还在处理这件事",
++            CARD_DIVIDER,
++            "我是「贾维斯」，正在继续跟进。",
++            "",
++            f"已用时｜约 {elapsed_mins} 分钟",
++            f"当前阶段｜{stage}",
++            f"已完成｜{completed}",
++            "",
++            "为什么会久｜",
++            reason,
++            "",
++            "你现在可以：",
++            "1. 继续等我查完",
++            "2. 补充一句更具体的范围或目标",
++            "3. 发送 /reset 取消当前任务",
++        )
+     )
+ 
+ 
+@@ -986,3 +1154,7 @@ def render_busy_ack(
+         next_step="请稍等，我会回复新的请求。",
+         extra_status=extra,
+     )
++
++
++
++
+diff --git a/gateway/run.py b/gateway/run.py
+index 5204287a4..d40bd9826 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -53,6 +53,7 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
+ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
+ from gateway.friendly_messages import (
++    is_continue_only_reply,
+     looks_like_ordinary_reply_card,
+     parse_approval_reply,
+     render_approval_denied,
+@@ -2639,6 +2640,9 @@ class GatewayRunner:
+             return False  # let default path handle it
+ 
+         running_agent = self._running_agents.get(session_key)
++        if is_continue_only_reply(event.text or ""):
++            logger.info("Suppressing continue-only busy ack for session %s", session_key)
++            return True
+ 
+         # Steer mode: inject mid-run via running_agent.steer() instead of
+         # queueing + interrupting.  If the agent isn't running yet
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+index b2c20e9a8..8a261a3c6 100644
+--- a/tests/gateway/test_friendly_messages.py
++++ b/tests/gateway/test_friendly_messages.py
+@@ -1,12 +1,14 @@
+ """Regression tests for gateway friendly-message contracts."""
+ 
+ from gateway.friendly_messages import (
++    is_continue_only_reply,
+     looks_like_ordinary_reply_card,
+     parse_approval_reply,
+     render_ack,
+     render_capabilities,
+     render_background_failure,
+     render_background_result,
++    render_background_review_notice,
+     render_approval_request,
+     render_busy_ack,
+     render_digest_report,
+@@ -134,6 +136,19 @@ def test_background_and_update_results_use_friendly_cards():
+     assert "Hermes update finished" not in update_ok
+ 
+ 
++def test_background_review_notice_uses_friendly_card():
++    user_card = render_background_review_notice("\U0001f4be Self-improvement review: User profile updated")
++    skill_card = render_background_review_notice("\U0001f4be Skill 'prospect-scanner' created.")
++
++    assert "\U0001f9e0 \u81ea\u6211\u5347\u7ea7\u5df2\u5b8c\u6210" in user_card
++    assert "\u7528\u6237\u753b\u50cf\u5df2\u66f4\u65b0" in user_card
++    assert "\u8fd9\u4e0d\u662f\u9519\u8bef\u544a\u8b66" in user_card
++    assert "\u4e0d\u4f1a\u5c55\u793a\u5185\u90e8 review\u3001\u91cd\u8bd5\u65e5\u5fd7\u6216\u82f1\u6587\u72b6\u6001" in user_card
++    assert "Self-improvement review" not in user_card
++    assert "User profile updated" not in user_card
++    assert "\u6280\u80fd\u5df2\u65b0\u589e\uff1aprospect-scanner" in skill_card
++
++
+ def test_parse_approval_reply_accepts_explicit_friendly_choices():
+     assert parse_approval_reply("01｜批准本次") == "once"
+     assert parse_approval_reply("本会话允许") == "session"
+@@ -154,8 +169,12 @@ def test_progress_template_hides_internal_activity():
+         },
+     )
+ 
+-    assert "任务仍在处理中" in text
+-    assert "正在等待模型输出" in text
++    assert text.startswith("⏳ 我还在处理这件事")
++    assert "────────────────────────" in text
++    assert "已用时｜约 3 分钟" in text
++    assert "当前阶段｜正在等待模型整理结果" in text
++    assert "为什么会久｜" in text
++    assert "你现在可以：" in text
+     assert "iteration" not in text
+     assert "16/90" not in text
+     assert "receiving stream response" not in text
+@@ -202,5 +221,13 @@ def test_ordinary_reply_uses_card_layout_and_urgent_style():
+     assert urgent.startswith("⚠️ 先确认安全")
+     assert "贾维斯" in urgent
+     assert "😊" not in urgent
++    sanitized = render_ordinary_reply("可以先检查提醒配置和通知链路 RuntimeError: Traceback boom")
++    assert "可以先检查提醒配置" in sanitized
++    assert "RuntimeError" not in sanitized
++    assert "Traceback" not in sanitized
++    assert "这里只保留可操作信息" not in sanitized
+ 
+     assert not looks_like_ordinary_reply_card("【状态】\n动作｜已处理")
++    assert is_continue_only_reply("继续")
++    assert is_continue_only_reply("接着说")
++    assert not is_continue_only_reply("继续检查地震提醒配置")
