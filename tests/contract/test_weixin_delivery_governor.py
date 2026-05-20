@@ -100,3 +100,4 @@ def test_friendly_card_hides_raw_rate_limit_markers(tmp_path: Path) -> None:
     assert "ret=-2" not in decision.friendly_text
     assert "RuntimeError" not in decision.friendly_text
     assert "Traceback" not in decision.friendly_text
+    assert decision.friendly_text.startswith("◇ 微信发送已进入保护队列")

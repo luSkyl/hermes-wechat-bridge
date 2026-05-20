@@ -25,14 +25,13 @@ def test_friendly_reply_uses_card_layout_for_normal_text() -> None:
 
     text = format_friendly_reply(response)
 
-    assert text.startswith("📍 先说结论")
-    assert "────────────────────────" in text
+    assert text.startswith("◉ 先说结论")
+    assert "【结论】" in text
     assert "|---|---|" not in text
-    assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
-    assert "✨ 重点细节" in text
+    assert "【关键信息】" in text
     assert "然后补充原因" in text
     assert "最后给下一步" in text
-    assert "🌿 接下来" in text
+    assert "【下一步】" in text
     assert "先做结论" in text
     assert looks_like_friendly_reply(text)
 
@@ -44,7 +43,7 @@ def test_friendly_reply_does_not_wrap_existing_card() -> None:
 
 
 def test_friendly_reply_truncates_long_text() -> None:
-    response = HermesResponse(text="A" * 4000, session_id="s-1")
+    response = HermesResponse(text="这是一段很长的说明。" * 300, session_id="s-1")
 
     text = format_friendly_reply(response, max_chars=200)
 
@@ -57,7 +56,7 @@ def test_friendly_reply_avoids_smiley_style_for_urgent_context() -> None:
 
     text = format_friendly_reply(response, source_text="现在在地震区，请优先给安全建议")
 
-    assert text.startswith("⚠️ 先确认安全")
+    assert text.startswith("🛡️ 先确认安全")
     assert "😊" not in text
     assert "😄" not in text
     assert "安全优先" in text or "现场权威指引" in text
@@ -66,8 +65,8 @@ def test_friendly_reply_avoids_smiley_style_for_urgent_context() -> None:
 def test_processing_notice_uses_friendly_card() -> None:
     text = format_processing_notice()
 
-    assert text.startswith("🧭 已收到")
-    assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
+    assert text.startswith("◌ 已收到")
+    assert "【结论】" in text
     assert "稍等一下" in text
 
 
@@ -90,5 +89,5 @@ def test_router_formats_reply_with_source_context(tmp_path) -> None:
 
     assert result.status == "delivered"
     assert result.reply_text is not None
-    assert result.reply_text.startswith("⚠️ 先确认安全")
+    assert result.reply_text.startswith("🛡️ 先确认安全")
     assert "😊" not in result.reply_text

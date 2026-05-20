@@ -17,19 +17,47 @@ RAW_ERROR_PATTERNS = (
     re.compile(r"Traceback \(most recent call last\):.*", re.IGNORECASE | re.DOTALL),
     re.compile(r"\bTraceback\b", re.IGNORECASE),
     re.compile(r"\bRuntimeError\b", re.IGNORECASE),
+    re.compile(r"\bHTTP\s*(?:4\d\d|5\d\d)\b", re.IGNORECASE),
+    re.compile(r"\b(?:Bad Gateway|Gateway Timeout)\b", re.IGNORECASE),
     re.compile(r"ret=-?\d+", re.IGNORECASE),
     re.compile(r"errcode=-?\d+", re.IGNORECASE),
     re.compile(r"https?://\S+", re.IGNORECASE),
     re.compile(r"[A-Za-z0-9_\-]{24,}"),
 )
 
-_SEVERITY_ICONS = {
-    "info": "💬",
-    "success": "🌿",
-    "warning": "⏳",
-    "error": "🛟",
-    "critical": "🚨",
+ASSISTANT_NAME = "贾维斯"
+DIVIDER = "────────────────────────"
+
+_SEMANTIC_ICONS = {
+    "decision": "◉",
+    "safety": "🛡️",
+    "progress": "◌",
+    "success": "✓",
+    "warning": "◇",
+    "error": "✕",
+    "detail": "◇",
+    "action": "↗",
 }
+
+_SEVERITY_ICONS = {
+    "info": _SEMANTIC_ICONS["decision"],
+    "progress": _SEMANTIC_ICONS["progress"],
+    "success": _SEMANTIC_ICONS["success"],
+    "warning": _SEMANTIC_ICONS["warning"],
+    "error": _SEMANTIC_ICONS["error"],
+    "critical": _SEMANTIC_ICONS["safety"],
+}
+
+REPLY_CARD_TITLES = (
+    f"{_SEMANTIC_ICONS['decision']} 先说结论",
+    f"{_SEMANTIC_ICONS['safety']} 先确认安全",
+    f"{_SEMANTIC_ICONS['progress']} 已收到",
+    f"{_SEMANTIC_ICONS['error']} 处理遇到问题",
+)
+GREETING = f"我是「{ASSISTANT_NAME}」，先把重点整理好。"
+TRUNCATION_NOTICE = "…内容较长，我已先保留重点，方便在微信里阅读。"
+URGENCY_NOTICE = "…内容较长，我先截到这里；安全相关信息建议优先按现场权威指引处理。"
+FRIENDLY_CARD_LABELS = ("【状态】", "【结论】", "【安全结论】")
 
 
 @dataclass(frozen=True)
@@ -55,16 +83,23 @@ class FriendlyCard:
     actions: tuple[str, ...] = ()
     footer: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    summary_label: str = "状态"
+    actions_label: str = "下一步"
 
     def render(self) -> str:
         icon = _SEVERITY_ICONS.get(self.severity, _SEVERITY_ICONS["info"])
-        parts = [f"{icon} {sanitize_user_visible(self.title)}", "", "【状态】", sanitize_user_visible(self.summary)]
+        parts = [
+            f"{icon} {sanitize_user_visible(self.title)}",
+            "",
+            _section_label(self.summary_label),
+            sanitize_user_visible(self.summary),
+        ]
         for section in self.sections:
             rendered = section.render()
             if rendered:
                 parts.extend(["", rendered])
         if self.actions:
-            parts.extend(["", "【下一步】", _join_body(self.actions)])
+            parts.extend(["", _section_label(self.actions_label), _join_body(self.actions)])
         if self.footer:
             parts.extend(["", sanitize_user_visible(self.footer)])
         return "\n".join(parts).strip()
@@ -78,6 +113,8 @@ class FriendlyCard:
             "actions": list(self.actions),
             "footer": self.footer,
             "metadata": self.metadata,
+            "summary_label": self.summary_label,
+            "actions_label": self.actions_label,
             "text": self.render(),
         }
 
@@ -91,6 +128,8 @@ def friendly_card(
     actions: Iterable[str] | None = None,
     footer: str | None = None,
     metadata: dict[str, Any] | None = None,
+    summary_label: str = "状态",
+    actions_label: str = "下一步",
 ) -> str:
     """Render a friendly card in the shared user-visible template."""
 
@@ -102,7 +141,43 @@ def friendly_card(
         actions=tuple(actions or ()),
         footer=footer,
         metadata=dict(metadata or {}),
+        summary_label=summary_label,
+        actions_label=actions_label,
     ).render()
+
+
+def friendly_reply_card(
+    *,
+    title: str,
+    summary: str,
+    detail: str | Iterable[str],
+    action: str,
+    urgent: bool = False,
+    severity: str | None = None,
+) -> str:
+    """Render ordinary assistant replies with the same card grammar."""
+
+    return friendly_card(
+        title=title,
+        summary=summary,
+        severity=severity or ("critical" if urgent else "info"),
+        sections=(("安全重点" if urgent else "关键信息", detail),),
+        actions=(action,),
+        summary_label="安全结论" if urgent else "结论",
+    )
+
+
+def processing_notice_card() -> str:
+    """Short acknowledgement card for async WeChat processing."""
+
+    return friendly_card(
+        title="已收到",
+        summary="我正在交给 Hermes 处理，会把结果整理成重点优先的回复。",
+        severity="progress",
+        sections=(("处理方式", GREETING),),
+        actions=("稍等一下，我会继续跟进。",),
+        summary_label="结论",
+    )
 
 
 def ensure_friendly_card(
@@ -209,7 +284,14 @@ def guardian_recovery_card(*, name: str, detail: str = "链路已恢复。") -> 
 
 
 def looks_like_friendly_card(text: str) -> bool:
-    return "【状态】" in text and any(text.startswith(icon) for icon in _SEVERITY_ICONS.values())
+    return any(label in text for label in FRIENDLY_CARD_LABELS) and any(
+        text.startswith(icon) for icon in _SEVERITY_ICONS.values()
+    )
+
+
+def looks_like_friendly_reply(text: str) -> bool:
+    clean = str(text or "").strip()
+    return clean.startswith(REPLY_CARD_TITLES) and (DIVIDER in clean or looks_like_friendly_card(clean))
 
 
 def sanitize_user_visible(text: Any) -> str:
@@ -225,6 +307,10 @@ def _join_body(body: str | Iterable[str]) -> str:
     if isinstance(body, str):
         return sanitize_user_visible(body)
     return "\n".join(f"- {sanitize_user_visible(item)}" for item in body)
+
+
+def _section_label(label: str) -> str:
+    return f"【{sanitize_user_visible(label)}】"
 
 
 def _format_next_available(next_available_at: float | None) -> str:

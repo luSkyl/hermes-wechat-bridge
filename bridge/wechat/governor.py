@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bridge.runtime.friendly_card import friendly_card as render_friendly_card
+
 HEALTHY = "HEALTHY"
 OPEN = "OPEN"
 HALF_OPEN = "HALF_OPEN"
@@ -639,63 +641,37 @@ def sanitize_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
 
 def format_governor_decision_card(decision: GovernorDecision) -> str:
     if decision.allowed:
-        return friendly_card(
-            "✅ 微信发送已通过治理检查",
-            action="已预留本周期发送名额",
-            result=f"本周期剩余 {decision.remaining}/{decision.capacity} 条",
-            impact="当前消息会继续发送，不会额外刷屏",
-            boundary="统计的是发送尝试次数，失败尝试也会占用额度",
-            next_step="如遇限流，我会自动进入保护队列并等待下一周期",
+        return render_friendly_card(
+            title="微信发送已通过治理检查",
+            summary="当前消息会继续发送，本周期发送名额已预留。",
+            severity="success",
+            sections=(
+                ("发送状态", f"本周期剩余 {decision.remaining}/{decision.capacity} 条"),
+                ("保护边界", "统计的是发送尝试次数，失败尝试也会占用额度。"),
+            ),
+            actions=("如遇限流，我会自动进入保护队列并等待下一周期。",),
         )
     if decision.reason == "queue_full_expired_low_priority":
-        return friendly_card(
-            "📭 微信发送保护队列已满",
-            action="已丢弃过期或低优先级通知",
-            result="本条消息暂未进入微信发送链路",
-            impact="避免继续触发 iLink 限流，详细记录保留在本地状态里",
-            boundary="不会用微信解释微信限流，避免延长限制窗口",
-            next_step="请在本地/Web UI 查看详情，或提高通知优先级后重试",
+        return render_friendly_card(
+            title="微信发送保护队列已满",
+            summary="本条消息没有进入微信发送链路，已丢弃过期或低优先级通知。",
+            severity="warning",
+            sections=(
+                ("影响", "避免继续触发 iLink 限流，详细记录保留在本地状态里。"),
+                ("保护边界", "不会用微信解释微信限流，避免延长限制窗口。"),
+            ),
+            actions=("请在本地或 Web UI 查看详情，或提高通知优先级后重试。",),
         )
-    return friendly_card(
-        "📌 微信发送已进入保护队列",
-        action="已暂停直接发送并排队",
-        result=f"当前队列 {decision.queue_size} 条，本周期剩余 {decision.remaining}/{decision.capacity} 条",
-        impact="你不会收到失败刷屏；通知会在后续可用周期合并或补发",
-        boundary="不会把原始错误、ret=-2 或堆栈内容发到聊天里",
-        next_step=_next_step_text(decision.next_available_at),
+    return render_friendly_card(
+        title="微信发送已进入保护队列",
+        summary="已暂停直接发送并排队，避免失败消息继续刷屏。",
+        severity="warning",
+        sections=(
+            ("队列状态", f"当前队列 {decision.queue_size} 条，本周期剩余 {decision.remaining}/{decision.capacity} 条"),
+            ("保护边界", "不会把原始错误或堆栈内容发到聊天里。"),
+        ),
+        actions=(_next_step_text(decision.next_available_at),),
     )
-
-
-def friendly_card(
-    title: str,
-    *,
-    action: str,
-    result: str,
-    impact: str,
-    boundary: str,
-    next_step: str,
-    extra_status: list[str] | None = None,
-) -> str:
-    lines = [
-        title,
-        "",
-        "【状态】",
-        f"动作｜{_sanitize_user_visible(action)}",
-        f"结果｜{_sanitize_user_visible(result)}",
-        f"影响｜{_sanitize_user_visible(impact)}",
-        f"边界｜{_sanitize_user_visible(boundary)}",
-    ]
-    lines.extend(_sanitize_user_visible(line) for line in (extra_status or []))
-    lines.extend(["", "【下一步】", _sanitize_user_visible(next_step)])
-    return "\n".join(lines)
-
-
-def _sanitize_user_visible(text: str) -> str:
-    sanitized = str(text or "")
-    lowered = sanitized.lower()
-    if any(marker in lowered for marker in RAW_ERROR_MARKERS):
-        return "微信发送链路正在保护中；原始技术细节已转入本地诊断记录。"
-    return sanitized
 
 
 def _next_step_text(next_available_at: float | None) -> str:

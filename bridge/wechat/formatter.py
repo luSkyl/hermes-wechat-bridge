@@ -5,13 +5,14 @@ from __future__ import annotations
 import re
 
 from bridge.protocol import HermesResponse
-
-ASSISTANT_NAME = "贾维斯"
-DIVIDER = "────────────────────────"
-GREETING = f"我是「{ASSISTANT_NAME}」，你的随身执行伙伴 😊～"
-REPLY_CARD_TITLES = ("📍 先说结论", "⚠️ 先确认安全")
-TRUNCATION_NOTICE = "…内容较长，我已先保留重点，方便在微信里阅读。"
-URGENCY_NOTICE = "…内容较长，我先截到这里；安全相关信息建议优先按现场权威指引处理。"
+from bridge.runtime.friendly_card import (
+    DIVIDER,
+    TRUNCATION_NOTICE,
+    URGENCY_NOTICE,
+    friendly_reply_card,
+    looks_like_friendly_reply,
+    processing_notice_card,
+)
 
 URGENT_KEYWORDS = (
     "地震",
@@ -40,20 +41,17 @@ URGENT_KEYWORDS = (
     "evacuation",
 )
 
-DETAIL_MARKERS = ("\n- ", "\n• ", "\n1.", "\n2.", "\n3.")
-
 
 def format_friendly_reply(response: HermesResponse, max_chars: int = 1800, source_text: str = "") -> str:
     """Format ordinary Hermes replies as a warm WeChat-friendly card."""
 
     if not response.ok:
         return _fit_to_limit(
-            _render_card(
-                title="⚠️ 处理遇到问题",
-                intro=f"我是「{ASSISTANT_NAME}」，先帮你把问题收住。",
+            friendly_reply_card(
+                title="处理遇到问题",
                 summary="我这边暂时没能完成处理。",
                 detail=_clean(response.error) or "请稍后再试一次。",
-                closing="我会尽量保留上下文，方便你继续追问。",
+                action="我会尽量保留上下文，方便你继续追问。",
                 urgent=True,
             ),
             max_chars,
@@ -64,42 +62,20 @@ def format_friendly_reply(response: HermesResponse, max_chars: int = 1800, sourc
     if looks_like_friendly_reply(text):
         return _fit_to_limit(text, max_chars, urgent=_is_urgent("\n".join((source_text, text))))
     urgent = _is_urgent("\n".join((source_text, text)))
-    title = "⚠️ 先确认安全" if urgent else "📍 先说结论"
-    intro = f"我是「{ASSISTANT_NAME}」，先帮你把重点稳住。" if urgent else GREETING
-    closing = "先按安全优先处理；你继续发现场情况，我再帮你一起判断。" if urgent else "如果你愿意，我可以继续帮你拆成步骤、风险点或执行清单 🌿"
-    card = _render_card(title=title, intro=intro, summary=_summary_from(text), detail=_detail_from(text), closing=closing, urgent=urgent)
+    title = "先确认安全" if urgent else "先说结论"
+    action = "先按安全优先处理；你继续发现场情况，我再帮你一起判断。" if urgent else "如果你愿意，我可以继续帮你拆成步骤、风险点或执行清单。"
+    card = friendly_reply_card(
+        title=title,
+        summary=_summary_from(text),
+        detail=_detail_from(text),
+        action=action,
+        urgent=urgent,
+    )
     return _fit_to_limit(card, max_chars, urgent=urgent)
 
 
 def format_processing_notice() -> str:
-    return _render_card(
-        title="🧭 已收到",
-        intro=GREETING,
-        summary="我正在交给 Hermes 处理。",
-        detail="我会尽快把结果整理成好读的回复，方便你直接看重点。",
-        closing="稍等一下，我来跟进 ✨",
-        urgent=False,
-    )
-
-
-def _render_card(*, title: str, intro: str, summary: str, detail: str, closing: str, urgent: bool) -> str:
-    detail_title = "🧭 关键信息" if urgent else "✨ 重点细节"
-    action_title = "📌 下一步" if urgent else "🌿 接下来"
-    return "\n".join(
-        (
-            title,
-            DIVIDER,
-            intro,
-            "",
-            summary,
-            "",
-            detail_title,
-            detail,
-            "",
-            action_title,
-            closing,
-        )
-    )
+    return processing_notice_card()
 
 
 def _summary_from(text: str) -> str:
@@ -153,11 +129,6 @@ def _looks_structured_reply_line(text: str) -> bool:
     if re.match(r"^[^\w\s]{1,4}\s+\S", stripped):
         return True
     return stripped.endswith(("：", ":"))
-
-
-def looks_like_friendly_reply(text: str) -> bool:
-    clean = str(text or "").strip()
-    return DIVIDER in clean and clean.startswith(REPLY_CARD_TITLES)
 
 
 def _fit_to_limit(text: str, max_chars: int, *, urgent: bool) -> str:
