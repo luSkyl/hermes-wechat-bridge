@@ -2,7 +2,7 @@
     "schema_version": 1,
     "name": "hermes-wechat-distribution",
     "version": "0.1.1",
-    "generated_at": "2026-05-19T20:52:00+08:00",
+    "generated_at": "2026-05-20T21:38:04+08:00",
     "bridge": {
         "repo": "https://github.com/luSkyl/hermes-wechat-bridge.git",
         "package": "hermes-wechat-bridge",
@@ -41,6 +41,11 @@
                 "path": "patches/hermes-core/0005-progress-speed-and-sanitization.patch",
                 "sha256": "dfd88a4ef936950917ccd43a005ab90db1aef9cb8f085d7d9a3ae7307ebb08ee",
                 "description": "Improve long-running progress cards, preserve useful sanitized reply content, and suppress duplicate continue-only busy acknowledgements."
+            },
+            {
+                "path": "patches/hermes-core/0006-gateway-speed-stack.patch",
+                "sha256": "43c645edc52210f0bf9dc58c2c93ebf823fe3ffe5ca24e810707f75cec9f2436",
+                "description": "Add gateway speed routing, fast ordinary-chat budgets, first-ack cards, earlier useful progress, and natural-language progress queries."
             }
         ]
     },

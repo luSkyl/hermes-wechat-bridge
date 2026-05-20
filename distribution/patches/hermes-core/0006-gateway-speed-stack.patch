@@ -1,0 +1,726 @@
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+index ab6ddeb95..ad1d624ce 100644
+--- a/gateway/friendly_messages.py
++++ b/gateway/friendly_messages.py
+@@ -80,6 +80,18 @@ CONTINUE_QUERIES = {
+     "接着",
+ }
+ 
++STATUS_QUERIES = {
++    "到哪了",
++    "现在到哪了",
++    "进度",
++    "当前进度",
++    "什么进度",
++    "处理到哪了",
++    "做到哪了",
++    "还在吗",
++    "状态",
++}
++
+ 
+ @dataclass(frozen=True)
+ class FriendlyPersona:
+@@ -178,6 +190,50 @@ def render_starting(action: str = "先看一下当前状态", config: Mapping[st
+     return f"我来处理，{_sanitize_user_visible(action)} 🔎"
+ 
+ 
++def render_task_started(
++    goal: str,
++    *,
++    next_feedback_seconds: int | float = 45,
++    config: Mapping[str, Any] | None = None,
++) -> str:
++    """Render a useful first acknowledgement for complex/long-running turns."""
++
++    persona = get_persona(config)
++    clean_goal = _sanitize_user_visible(goal).strip()
++    if len(clean_goal) > 90:
++        clean_goal = clean_goal[:87].rstrip() + "…"
++    if not clean_goal:
++        clean_goal = "处理你刚才交代的任务"
++    feedback_seconds = max(5, int(float(next_feedback_seconds or 45)))
++    urgent = _looks_urgent(clean_goal)
++    if urgent:
++        intro = f"我是「{persona.display_name}」，先按安全优先处理。"
++        title = "⚠️ 我已接手这件事"
++        first_step = "先确认关键信息，避免给你增加无效等待。"
++        emoji = "📌"
++    else:
++        intro = persona.greeting_text()
++        title = "🧭 我已接手这件事"
++        first_step = "先判断目标、上下文和需要调用的能力。"
++        emoji = "🔧"
++    return "\n".join(
++        [
++            title,
++            "",
++            intro,
++            CARD_DIVIDER,
++            "📌 我理解的目标",
++            clean_goal,
++            "",
++            f"{emoji} 我现在先做",
++            first_step,
++            "",
++            "⏱️ 下一次反馈",
++            f"如果 {feedback_seconds} 秒内还没完成，我会给你阶段进度。",
++        ]
++    )
++
++
+ def render_simple_done(next_step: str | None = None) -> str:
+     lines = ["处理好了 🌿"]
+     if next_step:
+@@ -267,6 +323,11 @@ def is_continue_only_reply(text: str) -> bool:
+     return normalized in CONTINUE_QUERIES
+ 
+ 
++def is_status_query_reply(text: str) -> bool:
++    normalized = _normalize_persona_query(text)
++    return normalized in STATUS_QUERIES
++
++
+ def render_ordinary_reply(text: str, config: Mapping[str, Any] | None = None) -> str:
+     persona = get_persona(config)
+     clean_text = _sanitize_user_visible(text).strip()
+diff --git a/gateway/run.py b/gateway/run.py
+index d40bd9826..9ca2b0e23 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -54,6 +54,7 @@ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
+ from gateway.friendly_messages import (
+     is_continue_only_reply,
++    is_status_query_reply,
+     looks_like_ordinary_reply_card,
+     parse_approval_reply,
+     render_approval_denied,
+@@ -69,6 +70,7 @@ from gateway.friendly_messages import (
+     render_pairing_rate_limited,
+     render_ordinary_reply,
+     render_persona_reply,
++    render_task_started,
+     render_task_progress,
+     render_telegram_topic_new_header,
+     render_telegram_topic_root_lobby,
+@@ -76,6 +78,11 @@ from gateway.friendly_messages import (
+     render_unknown_command,
+     render_update_result,
+ )
++from gateway.speed_router import (
++    SpeedRoute,
++    apply_speed_route_to_reasoning,
++    resolve_speed_route,
++)
+ from hermes_cli.config import cfg_get
+ 
+ # --- Agent cache tuning ---------------------------------------------------
+@@ -2643,6 +2650,36 @@ class GatewayRunner:
+         if is_continue_only_reply(event.text or ""):
+             logger.info("Suppressing continue-only busy ack for session %s", session_key)
+             return True
++        if is_status_query_reply(event.text or ""):
++            logger.info("Rendering busy status query for session %s", session_key)
++            activity_summary = None
++            elapsed_min = None
++            if running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
++                try:
++                    activity_summary = running_agent.get_activity_summary()
++                    start_ts = self._running_agents_ts.get(session_key, 0)
++                    if start_ts:
++                        elapsed_min = max(1, int((time.time() - start_ts) / 60))
++                except Exception:
++                    pass
++            reply_anchor = self._reply_anchor_for_event(event)
++            thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
++            try:
++                await adapter._send_with_retry(
++                    chat_id=event.source.chat_id,
++                    content=render_task_progress(elapsed_min or 1, activity_summary),
++                    reply_to=(
++                        reply_anchor
++                        if event.source.platform == Platform.TELEGRAM
++                        and event.source.chat_type == "dm"
++                        and event.source.thread_id
++                        else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
++                    ),
++                    metadata=thread_meta,
++                )
++            except Exception as e:
++                logger.debug("Failed to send busy status query reply: %s", e)
++            return True
+ 
+         # Steer mode: inject mid-run via running_agent.steer() instead of
+         # queueing + interrupting.  If the agent isn't running yet
+@@ -7173,6 +7210,21 @@ class GatewayRunner:
+         session_entry = self.session_store.get_or_create_session(source)
+         session_key = session_entry.session_key
+         self._cache_session_source(session_key, source)
++        user_config_for_speed = _load_gateway_config()
++        speed_route = resolve_speed_route(
++            event.text or "",
++            config=user_config_for_speed,
++            command=event.get_command(),
++            has_media=bool(getattr(event, "media_urls", None)),
++            is_followup=not getattr(session_entry, "was_auto_reset", False)
++            and session_entry.created_at != session_entry.updated_at,
++        )
++        logger.debug(
++            "Gateway speed route for session %s: %s (%s)",
++            session_key,
++            speed_route.name,
++            speed_route.reason,
++        )
+         if self._is_telegram_topic_lane(source):
+             try:
+                 binding = self._session_db.get_telegram_topic_binding(
+@@ -7753,6 +7805,7 @@ class GatewayRunner:
+                 run_generation=run_generation,
+                 event_message_id=self._reply_anchor_for_event(event),
+                 channel_prompt=event.channel_prompt,
++                speed_route=speed_route,
+             )
+ 
+             # Stop persistent typing indicator now that the agent is done
+@@ -14570,6 +14623,7 @@ class GatewayRunner:
+         _interrupt_depth: int = 0,
+         event_message_id: Optional[str] = None,
+         channel_prompt: Optional[str] = None,
++        speed_route: Optional[SpeedRoute] = None,
+     ) -> Dict[str, Any]:
+         """
+         Run the agent with the given message and context.
+@@ -14606,11 +14660,22 @@ class GatewayRunner:
+         
+         user_config = _load_gateway_config()
+         platform_key = _platform_config_key(source.platform)
++        if speed_route is None:
++            speed_route = resolve_speed_route(
++                message,
++                config=user_config,
++                has_media=False,
++                is_followup=bool(history),
++            )
+ 
+         from hermes_cli.tools_config import _get_platform_tools
+         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+         agent_cfg_local = user_config.get("agent") or {}
+         disabled_toolsets = agent_cfg_local.get("disabled_toolsets") or None
++        if speed_route.enabled_toolsets is not None:
++            enabled_toolsets = sorted(speed_route.enabled_toolsets)
++        if speed_route.disabled_toolsets is not None:
++            disabled_toolsets = sorted(speed_route.disabled_toolsets)
+ 
+         display_config = user_config.get("display", {})
+         if not isinstance(display_config, dict):
+@@ -15125,6 +15190,8 @@ class GatewayRunner:
+ 
+             # Read from env var or use default (same as CLI)
+             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
++            if speed_route.max_iterations is not None:
++                max_iterations = min(max_iterations, speed_route.max_iterations)
+             
+             # Map platform enum to the platform hint key the agent understands.
+             # Platform.LOCAL ("local") maps to "cli"; others pass through as-is.
+@@ -15167,6 +15234,7 @@ class GatewayRunner:
+                 source=source,
+                 session_key=session_key,
+             )
++            reasoning_config = apply_speed_route_to_reasoning(reasoning_config, speed_route)
+             self._reasoning_config = reasoning_config
+             self._service_tier = self._load_service_tier()
+             # Set up stream consumer for token streaming or interim commentary.
+@@ -15286,11 +15354,12 @@ class GatewayRunner:
+                 cache_keys=self._extract_cache_busting_config(user_config),
+             )
+             agent = None
++            route_max_iterations = max_iterations
+             _cache_lock = getattr(self, "_agent_cache_lock", None)
+             _cache = getattr(self, "_agent_cache", None)
+             if _cache_lock and _cache is not None:
+                 with _cache_lock:
+-                    cached = _cache.get(session_key)
++                    cached = None if speed_route.is_fast_chat else _cache.get(session_key)
+                     if cached and cached[1] == _sig:
+                         agent = cached[0]
+                         # Refresh LRU order so the cap enforcement evicts
+@@ -15301,6 +15370,7 @@ class GatewayRunner:
+                             except KeyError:
+                                 pass
+                         self._init_cached_agent_for_turn(agent, _interrupt_depth)
++                        agent.max_iterations = route_max_iterations
+                         logger.debug("Reusing cached agent for session %s", session_key)
+ 
+             if agent is None:
+@@ -15336,7 +15406,7 @@ class GatewayRunner:
+                     session_db=self._session_db,
+                     fallback_model=self._fallback_model,
+                 )
+-                if _cache_lock and _cache is not None:
++                if _cache_lock and _cache is not None and not speed_route.is_fast_chat:
+                     with _cache_lock:
+                         _cache[session_key] = (agent, _sig)
+                         self._enforce_agent_cache_cap()
+@@ -15352,6 +15422,7 @@ class GatewayRunner:
+             agent.reasoning_config = reasoning_config
+             agent.service_tier = self._service_tier
+             agent.request_overrides = turn_route.get("request_overrides") or {}
++            agent.max_iterations = route_max_iterations
+ 
+             _bg_review_release = threading.Event()
+             _bg_review_pending: list[str] = []
+@@ -16033,6 +16104,11 @@ class GatewayRunner:
+         # HERMES_AGENT_NOTIFY_INTERVAL env var.  Default 180s (3 min).
+         # 0 = disable notifications.
+         _NOTIFY_INTERVAL_RAW = _float_env("HERMES_AGENT_NOTIFY_INTERVAL", 180)
++        if speed_route.progress_first_after_seconds is not None:
++            _NOTIFY_INTERVAL_RAW = min(
++                _NOTIFY_INTERVAL_RAW,
++                float(speed_route.progress_first_after_seconds),
++            )
+         _NOTIFY_INTERVAL = _NOTIFY_INTERVAL_RAW if _NOTIFY_INTERVAL_RAW > 0 else None
+         _notify_start = time.time()
+ 
+@@ -16070,6 +16146,45 @@ class GatewayRunner:
+ 
+         _notify_task = asyncio.create_task(_notify_long_running())
+ 
++        _first_ack_task = None
++
++        async def _send_first_ack_if_needed():
++            if not speed_route.wants_first_ack:
++                return
++            _delay = float(speed_route.first_ack_seconds or 0)
++            if _delay > 0:
++                await asyncio.sleep(_delay)
++            if result_holder[0] is not None or not _run_still_current():
++                return
++            _ack_adapter = self.adapters.get(source.platform)
++            if not _ack_adapter:
++                return
++            try:
++                _ack_res = await _ack_adapter.send(
++                    source.chat_id,
++                    render_task_started(
++                        message,
++                        next_feedback_seconds=(
++                            speed_route.progress_first_after_seconds
++                            or _NOTIFY_INTERVAL
++                            or 45
++                        ),
++                        config=user_config,
++                    ),
++                    metadata=_status_thread_metadata,
++                )
++                if (
++                    _cleanup_progress
++                    and getattr(_ack_res, "success", False)
++                    and getattr(_ack_res, "message_id", None)
++                ):
++                    _cleanup_msg_ids.append(str(_ack_res.message_id))
++            except Exception as _ack_err:
++                logger.debug("First-ack notification error: %s", _ack_err)
++
++        if speed_route.wants_first_ack:
++            _first_ack_task = asyncio.create_task(_send_first_ack_if_needed())
++
+         try:
+             # Run in thread pool to not block.  Use an *inactivity*-based
+             # timeout instead of a wall-clock limit: the agent can run for
+@@ -16457,6 +16572,13 @@ class GatewayRunner:
+                     _interrupt_depth=_interrupt_depth + 1,
+                     event_message_id=next_message_id,
+                     channel_prompt=next_channel_prompt,
++                    speed_route=resolve_speed_route(
++                        next_message,
++                        config=user_config,
++                        command=None,
++                        has_media=False,
++                        is_followup=True,
++                    ),
+                 )
+                 return _preserve_queued_followup_history_offset(result, followup_result)
+         finally:
+@@ -16492,7 +16614,7 @@ class GatewayRunner:
+                 self._update_runtime_status("draining")
+             
+             # Wait for cancelled tasks
+-            for task in [progress_task, interrupt_monitor, tracking_task, _notify_task]:
++            for task in [progress_task, interrupt_monitor, tracking_task, _notify_task, _first_ack_task]:
+                 if task:
+                     try:
+                         await task
+diff --git a/gateway/speed_router.py b/gateway/speed_router.py
+new file mode 100644
+index 000000000..f9fa42ced
+--- /dev/null
++++ b/gateway/speed_router.py
+@@ -0,0 +1,294 @@
++"""Lightweight speed routing for gateway turns.
++
++The router keeps user-visible chats responsive by separating simple, no-tool
++conversation from full agent execution.  It is intentionally dependency-light so
++the gateway can call it before constructing an ``AIAgent`` and loading tool
++schemas.
++"""
++
++from __future__ import annotations
++
++import re
++from dataclasses import dataclass
++from typing import Any, Mapping, Sequence
++
++
++DEFAULT_FAST_CHAT_MAX_CHARS = 420
++DEFAULT_FAST_CHAT_MAX_ITERATIONS = 4
++DEFAULT_FIRST_ACK_SECONDS = 2.0
++DEFAULT_PROGRESS_FIRST_AFTER_SECONDS = 45.0
++
++
++URGENT_KEYWORDS = (
++    "地震",
++    "余震",
++    "震区",
++    "灾区",
++    "避险",
++    "撤离",
++    "报警",
++    "急救",
++    "危险",
++    "紧急",
++    "安全",
++    "受伤",
++    "火灾",
++    "洪水",
++    "台风",
++    "坍塌",
++    "泄漏",
++    "earthquake",
++    "aftershock",
++    "emergency",
++    "danger",
++    "urgent",
++    "evacuate",
++    "evacuation",
++)
++
++
++TOOL_REQUIRED_KEYWORDS = (
++    "落地",
++    "实现",
++    "修复",
++    "修改",
++    "改一下",
++    "直接操作",
++    "执行",
++    "运行",
++    "测试",
++    "构建",
++    "编译",
++    "重启",
++    "提交",
++    "推送",
++    "push",
++    "commit",
++    "github",
++    "git ",
++    "仓库",
++    "项目",
++    "代码",
++    "文件",
++    "目录",
++    "日志",
++    "报错",
++    "错误",
++    "bug",
++    "根因",
++    "排查",
++    "检查",
++    "搜索",
++    "查询",
++    "查一下",
++    "最新",
++    "今天",
++    "明天",
++    "提醒",
++    "定时",
++    "日程",
++    "照片",
++    "图片",
++    "截图",
++    "http://",
++    "https://",
++)
++
++
++SAFE_FAST_HINTS = (
++    "你觉得",
++    "怎么看",
++    "什么意思",
++    "怎么理解",
++    "解释一下",
++    "帮我润色",
++    "排版",
++    "友好",
++    "模板",
++    "方案",
++    "建议",
++    "普通消息",
++)
++
++
++_PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/[^\s]+/|\.\.?[/\\])")
++_CODE_BLOCK_RE = re.compile(r"```|`[^`]+`")
++
++
++@dataclass(frozen=True)
++class SpeedRoute:
++    """Resolved execution profile for one gateway turn."""
++
++    name: str
++    reason: str
++    enabled_toolsets: tuple[str, ...] | None = None
++    disabled_toolsets: tuple[str, ...] | None = None
++    max_iterations: int | None = None
++    reasoning_effort: str | None = None
++    first_ack_seconds: float | None = None
++    progress_first_after_seconds: float | None = None
++
++    @property
++    def is_fast_chat(self) -> bool:
++        return self.name in {"fast_chat", "safety_fast"}
++
++    @property
++    def wants_first_ack(self) -> bool:
++        return self.first_ack_seconds is not None and self.first_ack_seconds >= 0
++
++
++def resolve_speed_route(
++    text: str,
++    *,
++    config: Mapping[str, Any] | None = None,
++    command: str | None = None,
++    has_media: bool = False,
++    is_followup: bool = False,
++) -> SpeedRoute:
++    """Return the lightest safe execution route for a gateway message."""
++
++    speed_cfg = _speed_config(config)
++    if not _truthy(speed_cfg.get("enabled"), True):
++        return _agent_route("speed_disabled", speed_cfg)
++
++    clean = str(text or "").strip()
++    lowered = clean.lower()
++    if not clean:
++        return _agent_route("empty_message", speed_cfg)
++    if command or clean.startswith("/"):
++        return _agent_route("slash_command", speed_cfg)
++    if has_media:
++        return _agent_route("media_message", speed_cfg)
++    if _has_urgent_keyword(lowered):
++        return _fast_route("safety_fast", "urgent_safety", speed_cfg)
++    if not _truthy(speed_cfg.get("fast_chat_enabled"), True):
++        return _agent_route("fast_chat_disabled", speed_cfg)
++    if is_followup and not _truthy(speed_cfg.get("fast_chat_for_followups"), True):
++        return _agent_route("conversation_followup", speed_cfg)
++    if len(clean) > _int_value(speed_cfg.get("fast_chat_max_chars"), DEFAULT_FAST_CHAT_MAX_CHARS):
++        return _agent_route("message_too_long", speed_cfg)
++    if _looks_tool_required(clean, lowered):
++        return _agent_route("tool_required", speed_cfg)
++    if _looks_safe_fast_chat(clean, lowered):
++        return _fast_route("fast_chat", "safe_ordinary_chat", speed_cfg)
++    return _agent_route("uncertain_intent", speed_cfg)
++
++
++def apply_speed_route_to_reasoning(
++    reasoning_config: dict | None,
++    route: SpeedRoute,
++) -> dict | None:
++    """Apply a route-specific reasoning effort without importing heavy modules."""
++
++    if not route.reasoning_effort:
++        return reasoning_config
++    try:
++        from hermes_constants import parse_reasoning_effort
++
++        parsed = parse_reasoning_effort(route.reasoning_effort)
++    except Exception:
++        parsed = None
++    return parsed if parsed is not None else reasoning_config
++
++
++def _speed_config(config: Mapping[str, Any] | None) -> Mapping[str, Any]:
++    if not isinstance(config, Mapping):
++        return {}
++    speed = config.get("speed")
++    return speed if isinstance(speed, Mapping) else {}
++
++
++def _agent_route(reason: str, speed_cfg: Mapping[str, Any]) -> SpeedRoute:
++    first_ack = _float_value(
++        speed_cfg.get("complex_first_ack_seconds"),
++        DEFAULT_FIRST_ACK_SECONDS,
++    )
++    if not _truthy(speed_cfg.get("first_ack_enabled"), True):
++        first_ack = None
++    return SpeedRoute(
++        name="agent",
++        reason=reason,
++        first_ack_seconds=first_ack,
++        progress_first_after_seconds=_float_value(
++            speed_cfg.get("progress_first_after"),
++            DEFAULT_PROGRESS_FIRST_AFTER_SECONDS,
++        ),
++    )
++
++
++def _fast_route(name: str, reason: str, speed_cfg: Mapping[str, Any]) -> SpeedRoute:
++    raw_toolsets = speed_cfg.get("fast_chat_toolsets", [])
++    toolsets = _string_tuple(raw_toolsets)
++    return SpeedRoute(
++        name=name,
++        reason=reason,
++        enabled_toolsets=toolsets,
++        max_iterations=_int_value(
++            speed_cfg.get("fast_chat_max_iterations"),
++            DEFAULT_FAST_CHAT_MAX_ITERATIONS,
++        ),
++        reasoning_effort=str(speed_cfg.get("fast_chat_reasoning_effort") or "low"),
++        progress_first_after_seconds=_float_value(
++            speed_cfg.get("progress_first_after"),
++            DEFAULT_PROGRESS_FIRST_AFTER_SECONDS,
++        ),
++    )
++
++
++def _looks_tool_required(text: str, lowered: str) -> bool:
++    if _PATH_RE.search(text) or _CODE_BLOCK_RE.search(text):
++        return True
++    return any(keyword in lowered for keyword in TOOL_REQUIRED_KEYWORDS)
++
++
++def _looks_safe_fast_chat(text: str, lowered: str) -> bool:
++    if any(keyword in lowered for keyword in SAFE_FAST_HINTS):
++        return True
++    # Short conversational turns that do not ask Hermes to inspect or operate on
++    # external state are safe to answer without tool schemas.
++    if len(text) <= 80 and text.endswith(("？", "?")):
++        return True
++    return False
++
++
++def _has_urgent_keyword(lowered: str) -> bool:
++    return any(keyword in lowered for keyword in URGENT_KEYWORDS)
++
++
++def _truthy(value: Any, default: bool) -> bool:
++    if value is None:
++        return default
++    if isinstance(value, bool):
++        return value
++    return str(value).strip().lower() not in {"", "0", "false", "no", "off", "none"}
++
++
++def _int_value(value: Any, default: int) -> int:
++    try:
++        return max(1, int(value))
++    except (TypeError, ValueError):
++        return default
++
++
++def _float_value(value: Any, default: float | None) -> float | None:
++    if value is None:
++        return default
++    try:
++        number = float(value)
++    except (TypeError, ValueError):
++        return default
++    if number < 0:
++        return None
++    return number
++
++
++def _string_tuple(value: Any) -> tuple[str, ...]:
++    if value is None:
++        return ()
++    if isinstance(value, str):
++        items: Sequence[Any] = [part.strip() for part in value.split(",")]
++    elif isinstance(value, Sequence):
++        items = value
++    else:
++        return ()
++    return tuple(str(item).strip() for item in items if str(item).strip())
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+index 8a261a3c6..91aea3a64 100644
+--- a/tests/gateway/test_friendly_messages.py
++++ b/tests/gateway/test_friendly_messages.py
+@@ -2,6 +2,7 @@
+ 
+ from gateway.friendly_messages import (
+     is_continue_only_reply,
++    is_status_query_reply,
+     looks_like_ordinary_reply_card,
+     parse_approval_reply,
+     render_ack,
+@@ -19,11 +20,13 @@ from gateway.friendly_messages import (
+     render_simple_done,
+     render_simple_failure,
+     render_starting,
++    render_task_started,
+     render_plain_table,
+     render_task_progress,
+     render_update_result,
+     render_welcome,
+ )
++from gateway.speed_router import resolve_speed_route
+ 
+ 
+ def test_approval_request_uses_friendly_template():
+@@ -180,6 +183,39 @@ def test_progress_template_hides_internal_activity():
+     assert "receiving stream response" not in text
+ 
+ 
++def test_task_started_template_sets_expectations():
++    text = render_task_started(
++        "按照方案优化 Hermes 的普通消息速度",
++        next_feedback_seconds=35,
++        config={"friendly": {"persona": {"display_name": "贾维斯"}}},
++    )
++
++    assert text.startswith("🧭 我已接手这件事")
++    assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
++    assert "────────────────────────" in text
++    assert "📌 我理解的目标" in text
++    assert "⏱️ 下一次反馈" in text
++    assert "35 秒" in text
++
++
++def test_speed_router_fast_chat_is_conservative():
++    fast = resolve_speed_route("你觉得这个普通消息模板友好吗？", config={})
++    safety = resolve_speed_route("我现在在地震区，应该先做什么？", config={})
++    code = resolve_speed_route("按照方案全部落地并 push 到 GitHub", config={})
++    media = resolve_speed_route("帮我看看这张图", config={}, has_media=True)
++    command = resolve_speed_route("/status", config={}, command="status")
++
++    assert fast.name == "fast_chat"
++    assert fast.enabled_toolsets == ()
++    assert fast.max_iterations == 4
++    assert fast.reasoning_effort == "low"
++    assert safety.name == "safety_fast"
++    assert code.name == "agent"
++    assert code.wants_first_ack
++    assert media.name == "agent"
++    assert command.name == "agent"
++
++
+ def test_busy_and_timeout_templates_hide_internal_activity():
+     summary = {
+         "api_call_count": 16,
+@@ -231,3 +267,6 @@ def test_ordinary_reply_uses_card_layout_and_urgent_style():
+     assert is_continue_only_reply("继续")
+     assert is_continue_only_reply("接着说")
+     assert not is_continue_only_reply("继续检查地震提醒配置")
++    assert is_status_query_reply("到哪了")
++    assert is_status_query_reply("当前进度")
++    assert not is_status_query_reply("进度优化方案")
