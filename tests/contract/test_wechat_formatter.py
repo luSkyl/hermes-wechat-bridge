@@ -7,7 +7,7 @@ from bridge.protocol import HermesResponse
 from bridge.runtime.config import BridgeConfig, HermesConfig, RuntimeConfig, WeChatConfig
 from bridge.runtime.router import GatewayRouter
 from bridge.wechat import WeChatAdapter, WeChatSender
-from bridge.wechat.formatter import format_friendly_reply, format_processing_notice
+from bridge.wechat.formatter import format_friendly_reply, format_processing_notice, looks_like_friendly_reply
 
 
 def _config(tmp_path) -> BridgeConfig:
@@ -21,16 +21,26 @@ def _config(tmp_path) -> BridgeConfig:
 
 
 def test_friendly_reply_uses_card_layout_for_normal_text() -> None:
-    response = HermesResponse(text="先做结论\n然后补充原因\n最后给下一步", session_id="s-1")
+    response = HermesResponse(text="先做结论\n然后补充原因\n|---|---|\n最后给下一步", session_id="s-1")
 
     text = format_friendly_reply(response)
 
     assert text.startswith("📍 先说结论")
     assert "────────────────────────" in text
-    assert "我是「贾维斯」，你的随身执行伙伴" in text
+    assert "|---|---|" not in text
+    assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
     assert "✨ 重点细节" in text
+    assert "然后补充原因" in text
+    assert "最后给下一步" in text
     assert "🌿 接下来" in text
     assert "先做结论" in text
+    assert looks_like_friendly_reply(text)
+
+
+def test_friendly_reply_does_not_wrap_existing_card() -> None:
+    card = format_friendly_reply(HermesResponse(text="先做结论\n然后补充原因", session_id="s-1"))
+
+    assert format_friendly_reply(HermesResponse(text=card, session_id="s-1")) == card
 
 
 def test_friendly_reply_truncates_long_text() -> None:
@@ -57,7 +67,7 @@ def test_processing_notice_uses_friendly_card() -> None:
     text = format_processing_notice()
 
     assert text.startswith("🧭 已收到")
-    assert "我是「贾维斯」" in text
+    assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
     assert "稍等一下" in text
 
 

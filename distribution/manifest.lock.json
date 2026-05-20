@@ -31,6 +31,11 @@
                 "path": "patches/hermes-core/0003-local-profile-vault-guard.patch",
                 "sha256": "b83599c2bca58fd64172087d3d2d95426e9c8630702139ab73712e96d646751e",
                 "description": "Protected local Hermes profile backup guard for update, profile distribution, and uninstall flows."
+            },
+            {
+                "path": "patches/hermes-core/0004-ordinary-reply-friendly-cards.patch",
+                "sha256": "f0618490711c47c346676752821ac31f9a6aee64e4df681bad08fba5ac93e28f",
+                "description": "Ordinary Hermes replies are rendered through persona-aware friendly cards with long dividers and emergency-safe tone."
             }
         ]
     },

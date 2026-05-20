@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import re
+
 from bridge.protocol import HermesResponse
 
 ASSISTANT_NAME = "贾维斯"
 DIVIDER = "────────────────────────"
+GREETING = f"我是「{ASSISTANT_NAME}」，你的随身执行伙伴 😊～"
+REPLY_CARD_TITLES = ("📍 先说结论", "⚠️ 先确认安全")
 TRUNCATION_NOTICE = "…内容较长，我已先保留重点，方便在微信里阅读。"
 URGENCY_NOTICE = "…内容较长，我先截到这里；安全相关信息建议优先按现场权威指引处理。"
 
@@ -36,7 +40,7 @@ URGENT_KEYWORDS = (
     "evacuation",
 )
 
-DETAIL_MARKERS = ("\n- ", "\n• ", "\n1.", "\n2.", "\n3.", "。", "；", ";")
+DETAIL_MARKERS = ("\n- ", "\n• ", "\n1.", "\n2.", "\n3.")
 
 
 def format_friendly_reply(response: HermesResponse, max_chars: int = 1800, source_text: str = "") -> str:
@@ -57,10 +61,12 @@ def format_friendly_reply(response: HermesResponse, max_chars: int = 1800, sourc
         )
 
     text = _clean(response.text) or "我已收到，但 Hermes 没有返回可展示内容。"
+    if looks_like_friendly_reply(text):
+        return _fit_to_limit(text, max_chars, urgent=_is_urgent("\n".join((source_text, text))))
     urgent = _is_urgent("\n".join((source_text, text)))
     title = "⚠️ 先确认安全" if urgent else "📍 先说结论"
-    intro = f"我是「{ASSISTANT_NAME}」，先帮你把重点稳住。" if urgent else f"我是「{ASSISTANT_NAME}」，你的随身执行伙伴 😊"
-    closing = "先按安全优先处理；你继续发现场情况，我再帮你一起判断。" if urgent else "你如果想继续，我可以接着帮你拆细节 🌿"
+    intro = f"我是「{ASSISTANT_NAME}」，先帮你把重点稳住。" if urgent else GREETING
+    closing = "先按安全优先处理；你继续发现场情况，我再帮你一起判断。" if urgent else "如果你愿意，我可以继续帮你拆成步骤、风险点或执行清单 🌿"
     card = _render_card(title=title, intro=intro, summary=_summary_from(text), detail=_detail_from(text), closing=closing, urgent=urgent)
     return _fit_to_limit(card, max_chars, urgent=urgent)
 
@@ -68,7 +74,7 @@ def format_friendly_reply(response: HermesResponse, max_chars: int = 1800, sourc
 def format_processing_notice() -> str:
     return _render_card(
         title="🧭 已收到",
-        intro=f"我是「{ASSISTANT_NAME}」，你的随身执行伙伴。",
+        intro=GREETING,
         summary="我正在交给 Hermes 处理。",
         detail="我会尽快把结果整理成好读的回复，方便你直接看重点。",
         closing="稍等一下，我来跟进 ✨",
@@ -112,21 +118,46 @@ def _detail_from(text: str) -> str:
         return "暂无更多细节。"
     remaining = paragraphs[1:]
     if remaining:
-        return "\n".join(_decorate_detail(item) for item in remaining[:4])
-    if any(marker in text for marker in DETAIL_MARKERS):
-        return text
+        return "\n".join(_decorate_detail(item) for item in remaining)
+    summary = _summary_from(text)
+    if paragraphs[0] != summary:
+        return paragraphs[0]
     return "我已经把核心内容放在上面；如果你需要，我可以继续展开原因、步骤或风险点。"
 
 
 def _decorate_detail(text: str) -> str:
     stripped = text.strip()
-    if stripped.startswith(("- ", "• ", "· ", "1.", "2.", "3.", "4.", "5.")):
+    if stripped == DIVIDER or _looks_structured_reply_line(stripped):
         return stripped
     return f"• {stripped}"
 
 
 def _paragraphs(text: str) -> list[str]:
-    return [line.strip() for line in text.replace("\r\n", "\n").split("\n") if line.strip()]
+    lines = [_normalize_reply_line(line) for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    return [line for line in lines if line]
+
+
+def _normalize_reply_line(line: str) -> str:
+    clean = str(line or "").strip()
+    if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", clean):
+        return DIVIDER
+    return clean
+
+
+def _looks_structured_reply_line(text: str) -> bool:
+    stripped = text.lstrip()
+    if stripped.startswith(("- ", "* ", "• ", "· ", ">", "#", "```", "【")):
+        return True
+    if re.match(r"^\d{1,2}[.)、]\s*\S", stripped):
+        return True
+    if re.match(r"^[^\w\s]{1,4}\s+\S", stripped):
+        return True
+    return stripped.endswith(("：", ":"))
+
+
+def looks_like_friendly_reply(text: str) -> bool:
+    clean = str(text or "").strip()
+    return DIVIDER in clean and clean.startswith(REPLY_CARD_TITLES)
 
 
 def _fit_to_limit(text: str, max_chars: int, *, urgent: bool) -> str:

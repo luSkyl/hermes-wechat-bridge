@@ -1,0 +1,5 @@
+﻿4f29905ba fix(gateway): render ordinary replies with friendly cards
+ gateway/friendly_messages.py            | 111 ++++++++++++++++++++++++++++++++
+ gateway/run.py                          |  10 +++
+ tests/gateway/test_friendly_messages.py |  29 +++++++++
+ 3 files changed, 150 insertions(+)
