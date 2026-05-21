@@ -18,6 +18,8 @@ RAW_ERROR_PATTERNS = (
     re.compile(r"\bTraceback\b", re.IGNORECASE),
     re.compile(r"\bRuntimeError\b", re.IGNORECASE),
     re.compile(r"\bHTTP\s*(?:4\d\d|5\d\d)\b", re.IGNORECASE),
+    re.compile(r"\b(?:Invalid API key|INVALID_API_KEY|AuthenticationError|Unauthorized)\b", re.IGNORECASE),
+    re.compile(r"\b(?:Non-retryable error|trying fallback|Error code:)\b", re.IGNORECASE),
     re.compile(r"\b(?:Bad Gateway|Gateway Timeout)\b", re.IGNORECASE),
     re.compile(r"ret=-?\d+", re.IGNORECASE),
     re.compile(r"errcode=-?\d+", re.IGNORECASE),
@@ -29,14 +31,14 @@ ASSISTANT_NAME = "贾维斯"
 DIVIDER = "────────────────────────"
 
 _SEMANTIC_ICONS = {
-    "decision": "◉",
-    "safety": "🛡️",
-    "progress": "◌",
-    "success": "✓",
-    "warning": "◇",
-    "error": "✕",
-    "detail": "◇",
-    "action": "↗",
+    "decision": "📍",
+    "safety": "⚠️",
+    "progress": "🧭",
+    "success": "🌿",
+    "warning": "📌",
+    "error": "⚠️",
+    "detail": "✨",
+    "action": "🌿",
 }
 
 _SEVERITY_ICONS = {
@@ -54,10 +56,10 @@ REPLY_CARD_TITLES = (
     f"{_SEMANTIC_ICONS['progress']} 已收到",
     f"{_SEMANTIC_ICONS['error']} 处理遇到问题",
 )
-GREETING = f"我是「{ASSISTANT_NAME}」，先把重点整理好。"
+GREETING = f"我是「{ASSISTANT_NAME}」，你的随身执行伙伴 😊～"
 TRUNCATION_NOTICE = "…内容较长，我已先保留重点，方便在微信里阅读。"
 URGENCY_NOTICE = "…内容较长，我先截到这里；安全相关信息建议优先按现场权威指引处理。"
-FRIENDLY_CARD_LABELS = ("【状态】", "【结论】", "【安全结论】")
+FRIENDLY_CARD_LABELS = ("📌 当前情况", "📍 先说结论", "⚠️ 先确认安全", DIVIDER)
 
 
 @dataclass(frozen=True)
@@ -69,7 +71,7 @@ class FriendlySection:
 
     def render(self) -> str:
         body_text = _join_body(self.body)
-        return f"【{sanitize_user_visible(self.title)}】\n{body_text}".strip()
+        return f"{_section_icon(self.title)} {sanitize_user_visible(self.title)}\n{body_text}".strip()
 
 
 @dataclass(frozen=True)
@@ -83,14 +85,14 @@ class FriendlyCard:
     actions: tuple[str, ...] = ()
     footer: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    summary_label: str = "状态"
-    actions_label: str = "下一步"
+    summary_label: str = "当前情况"
+    actions_label: str = "接下来"
 
     def render(self) -> str:
         icon = _SEVERITY_ICONS.get(self.severity, _SEVERITY_ICONS["info"])
         parts = [
             f"{icon} {sanitize_user_visible(self.title)}",
-            "",
+            DIVIDER,
             _section_label(self.summary_label),
             sanitize_user_visible(self.summary),
         ]
@@ -128,8 +130,8 @@ def friendly_card(
     actions: Iterable[str] | None = None,
     footer: str | None = None,
     metadata: dict[str, Any] | None = None,
-    summary_label: str = "状态",
-    actions_label: str = "下一步",
+    summary_label: str = "当前情况",
+    actions_label: str = "接下来",
 ) -> str:
     """Render a friendly card in the shared user-visible template."""
 
@@ -161,9 +163,9 @@ def friendly_reply_card(
         title=title,
         summary=summary,
         severity=severity or ("critical" if urgent else "info"),
-        sections=(("安全重点" if urgent else "关键信息", detail),),
+        sections=(("关键信息" if urgent else "重点细节", detail),),
         actions=(action,),
-        summary_label="安全结论" if urgent else "结论",
+        summary_label="先确认安全" if urgent else "先说结论",
     )
 
 
@@ -176,7 +178,7 @@ def processing_notice_card() -> str:
         severity="progress",
         sections=(("处理方式", GREETING),),
         actions=("稍等一下，我会继续跟进。",),
-        summary_label="结论",
+        summary_label="当前情况",
     )
 
 
@@ -310,7 +312,22 @@ def _join_body(body: str | Iterable[str]) -> str:
 
 
 def _section_label(label: str) -> str:
-    return f"【{sanitize_user_visible(label)}】"
+    return f"{_section_icon(label)} {sanitize_user_visible(label)}"
+
+
+def _section_icon(label: str) -> str:
+    normalized = str(label or "")
+    if any(token in normalized for token in ("下一步", "接下来", "操作")):
+        return "🌿"
+    if any(token in normalized for token in ("原因", "状态", "当前", "失败")):
+        return "📌"
+    if any(token in normalized for token in ("先说结论", "结论")):
+        return "📍"
+    if any(token in normalized for token in ("结果", "对象", "任务", "处理")):
+        return "🔧"
+    if any(token in normalized for token in ("影响", "安全", "边界", "关键信息")):
+        return "🧭"
+    return "✨"
 
 
 def _format_next_available(next_available_at: float | None) -> str:

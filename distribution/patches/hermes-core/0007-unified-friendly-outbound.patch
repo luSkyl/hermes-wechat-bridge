@@ -1,0 +1,725 @@
+diff --git a/cron/scheduler.py b/cron/scheduler.py
+index 3385f1fa8..ce2e46c34 100644
+--- a/cron/scheduler.py
++++ b/cron/scheduler.py
+@@ -39,6 +39,7 @@ from hermes_constants import get_hermes_home
+ from hermes_cli.config import load_config, _expand_env_vars
+ from hermes_time import now as _hermes_now
+ from gateway.friendly_messages import (
++    CARD_DIVIDER,
+     render_cron_failure,
+     render_cron_result,
+ )
+@@ -146,6 +147,19 @@ def _format_cron_failure_card(job: dict, error: str | None) -> str:
+     return render_cron_failure(job_name, error)
+ 
+ 
++def _looks_like_cron_card(content: str) -> bool:
++    clean = str(content or "").strip()
++    if not clean:
++        return False
++    if CARD_DIVIDER not in clean and "【状态】" not in clean:
++        return False
++    return clean.startswith((
++        "🌿 定时任务已完成",
++        "⚠️ 这轮任务没跑完",
++        "⚠️ 定时任务",
++    ))
++
++
+ def _get_lock_paths() -> tuple[Path, Path]:
+     """Resolve cron lock paths at call time so profile/env changes are honored."""
+     hermes_home = _get_hermes_home()
+@@ -526,7 +540,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
+     except Exception:
+         pass
+ 
+-    if wrap_response:
++    if wrap_response and not _looks_like_cron_card(content):
+         task_name = job.get("name", job["id"])
+         delivery_content = render_cron_result(str(task_name), content)
+     else:
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+index ad1d624ce..fee77e003 100644
+--- a/gateway/friendly_messages.py
++++ b/gateway/friendly_messages.py
+@@ -54,8 +54,23 @@ RAW_ERROR_MARKERS = (
+     "traceback",
+     "runtimeerror",
+     "httperror",
++    "http 4",
+     "http 5",
++    "http 401",
++    "http 402",
++    "http 403",
+     "http 429",
++    "error code:",
++    "invalid api key",
++    "invalid_api_key",
++    "api key",
++    "authentication failed",
++    "authenticationerror",
++    "provider authentication failed",
++    "unauthorized",
++    "non-retryable error",
++    "trying fallback",
++    "rate limited",
+     "ret=-2",
+     "errcode=-2",
+     "last_status=",
+@@ -522,20 +537,29 @@ class FriendlyCard:
+     boundary: str
+     next_step: str
+     extra_status: tuple[str, ...] = field(default_factory=tuple)
+-    next_heading: str = "【下一步】"
++    next_heading: str = "下一步"
+ 
+     def render(self) -> str:
++        title = _sanitize_user_visible(self.title)
+         lines = [
+-            _sanitize_user_visible(self.title),
++            title,
++            CARD_DIVIDER,
++            "📌 当前情况",
++            _sanitize_user_visible(self.result),
++            "",
++            "🔧 我已处理",
++            _sanitize_user_visible(self.action),
+             "",
+-            "【状态】",
+-            f"动作｜{_sanitize_user_visible(self.action)}",
+-            f"结果｜{_sanitize_user_visible(self.result)}",
+-            f"影响｜{_sanitize_user_visible(self.impact)}",
+-            f"边界｜{_sanitize_user_visible(self.boundary)}",
++            "🧭 影响范围",
++            _sanitize_user_visible(self.impact),
++            "",
++            "🔒 安全边界",
++            _sanitize_user_visible(self.boundary),
+         ]
+-        lines.extend(_sanitize_user_visible(line) for line in self.extra_status if line)
+-        lines.extend(["", self.next_heading, _sanitize_user_visible(self.next_step)])
++        cleaned_extra = [_sanitize_user_visible(line) for line in self.extra_status if line]
++        if cleaned_extra:
++            lines.extend(["", "✨ 补充说明", *cleaned_extra])
++        lines.extend(["", _friendly_next_heading(self.next_heading), _sanitize_user_visible(self.next_step)])
+         return "\n".join(lines)
+ 
+ 
+@@ -548,7 +572,7 @@ def friendly_card(
+     boundary: str,
+     next_step: str,
+     extra_status: Iterable[str] | None = None,
+-    next_heading: str = "【下一步】",
++    next_heading: str = "下一步",
+ ) -> str:
+     return FriendlyCard(
+         title=title,
+@@ -562,6 +586,120 @@ def friendly_card(
+     ).render()
+ 
+ 
++def _friendly_next_heading(heading: str) -> str:
++    clean = str(heading or "").strip("【】 ")
++    if not clean or clean == "下一步":
++        return "🌿 接下来"
++    return f"🌿 {clean}"
++
++
++def render_runtime_issue_notice(error: Any, config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    raw = str(error or "").strip()
++    public_reason = _public_runtime_issue_reason(raw)
++    return "\n".join(
++        [
++            "⚠️ 处理遇到问题",
++            CARD_DIVIDER,
++            f"我是「{persona.display_name}」，我不会把内部错误原样发到聊天里。",
++            "",
++            "📌 当前情况",
++            public_reason,
++            "",
++            "🧭 影响范围",
++            "这轮处理没有完整完成，但我会保留上下文，避免你重复说明。",
++            "",
++            "🌿 接下来",
++            "我会优先检查配置、备用通道和任务状态；你也可以直接让我继续修复。",
++        ]
++    )
++
++
++def render_empty_response_notice(config: Mapping[str, Any] | None = None) -> str:
++    persona = get_persona(config)
++    return "\n".join(
++        [
++            "⚠️ 本轮没有可展示内容",
++            CARD_DIVIDER,
++            f"我是「{persona.display_name}」，我已经拦截了空白回复。",
++            "",
++            "📌 当前情况",
++            "模型或工具链没有生成适合直接发送到聊天里的正文。",
++            "",
++            "🧭 影响范围",
++            "不会把空白占位符、内部状态或原始调试信息发给你。",
++            "",
++            "🌿 接下来",
++            "请重试一次，或换一种问法；如果连续发生，我会继续保留诊断线索。",
++        ]
++    )
++
++
++def ensure_friendly_outbound(
++    text: Any,
++    *,
++    category: str = "status",
++    config: Mapping[str, Any] | None = None,
++) -> str:
++    raw = str(text or "").strip()
++    if not raw:
++        return render_empty_response_notice(config)
++    clean = _sanitize_user_visible(raw).strip()
++    if looks_like_ordinary_reply_card(clean) or _looks_like_friendly_status_card(clean):
++        return clean
++    if _contains_raw_error(raw):
++        return render_runtime_issue_notice(raw, config)
++    if category == "assistant":
++        return render_ordinary_reply(clean, config)
++    if category == "status":
++        return friendly_card(
++            "🧭 当前进展",
++            action="已把系统状态转换成可读说明",
++            result=clean,
++            impact="你能看到当前处理进展，不需要阅读内部英文日志或调试字段",
++            boundary="不会展示密钥、接口地址、堆栈或原始供应商错误",
++            next_step="我会继续推进；如果还没完成，会按节奏继续反馈。",
++        )
++    return clean
++
++
++def _contains_raw_error(text: Any) -> bool:
++    lowered = str(text or "").lower()
++    return any(marker in lowered for marker in RAW_ERROR_MARKERS)
++
++
++def _looks_like_friendly_status_card(text: str) -> bool:
++    clean = str(text or "").strip()
++    if not clean or CARD_DIVIDER not in clean:
++        return False
++    return clean.startswith((
++        "⚠️",
++        "🧭",
++        "🌿",
++        "📌",
++        "♻️",
++        "📬",
++        "📭",
++        "🧩",
++        "🛡️",
++    ))
++
++
++def _public_runtime_issue_reason(error: str) -> str:
++    lowered = str(error or "").lower()
++    if any(token in lowered for token in ("invalid api key", "invalid_api_key", "api key", "authentication", "unauthorized", "http 401")):
++        return "模型服务鉴权没有通过；密钥、接口返回和供应商原文已隐藏。"
++    if "rate limited" in lowered or "http 429" in lowered or "ret=-2" in lowered or "errcode=-2" in lowered:
++        return "当前通道触发限流或发送保护；我会暂停刷屏，并等待可用窗口再继续。"
++    if "trying fallback" in lowered or "fallback" in lowered:
++        return "主通道没有顺利完成，我正在切换备用通道或保留现场。"
++    if "timeout" in lowered or "timed out" in lowered:
++        return "上游响应超时；我已停止本轮继续等待，避免你长时间看不到结果。"
++    if "traceback" in lowered or "runtimeerror" in lowered:
++        return "内部执行链路遇到异常；堆栈和调试细节已转入本地日志。"
++    return "内部技术细节已隐藏；当前只保留对你有用的处理状态。"
++
++
+ def render_cron_result(job_name: str, content: str) -> str:
+     return friendly_card(
+         f"🌿 定时任务已完成｜{job_name}",
+@@ -894,25 +1032,26 @@ def render_approval_request(command: str, session_key: str, description: str = "
+     return "\n".join(
+         [
+             f"{summary['title']}｜{summary['risk_pill']}",
+-            "",
++            CARD_DIVIDER,
+             "我已暂停执行。确认前，这条命令不会运行。",
+             "",
+-            "【判断信息】",
+-            f"风险｜{summary['risk']}",
+-            f"范围｜{summary['scope']}",
+-            "命令｜",
++            "📌 判断信息",
++            f"• 风险：{summary['risk']}",
++            f"• 范围：{summary['scope']}",
++            f"• 审批 ID：{summary['approval_id']}",
++            "",
++            "🧾 待审批命令",
+             "```",
+             summary["command"],
+             "```",
+-            f"审批 ID｜{summary['approval_id']}",
+             "",
+-            "【可选操作】",
++            "🌿 可选操作",
+             "01｜批准本次",
+             "02｜本会话允许",
+             "03｜永久允许",
+             "04｜拒绝",
+             "",
+-            "【下一步】",
++            "📌 下一步",
+             "直接回复序号或文字：批准本次 / 本会话允许 / 永久允许 / 拒绝。",
+         ]
+     )
+@@ -1219,3 +1358,4 @@ def render_busy_ack(
+ 
+ 
+ 
++
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index c6bdc38c3..d43fbde76 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -3372,16 +3372,14 @@ class BasePlatformAdapter(ABC):
+             logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
+             # Send the error to the user so they aren't left with radio silence
+             try:
++                from gateway.friendly_messages import render_runtime_issue_notice
++
+                 error_type = type(e).__name__
+                 error_detail = str(e)[:300] if str(e) else "no details available"
+                 _thread_metadata = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
+                 await self.send(
+                     chat_id=event.source.chat_id,
+-                    content=(
+-                        f"Sorry, I encountered an error ({error_type}).\n"
+-                        f"{error_detail}\n"
+-                        "Try again or use /reset to start a fresh session."
+-                    ),
++                    content=render_runtime_issue_notice(f"{error_type}: {error_detail}"),
+                     metadata=_thread_metadata,
+                 )
+             except Exception:
+diff --git a/gateway/platforms/feishu.py b/gateway/platforms/feishu.py
+index aa8921649..6281a24a4 100644
+--- a/gateway/platforms/feishu.py
++++ b/gateway/platforms/feishu.py
+@@ -1884,10 +1884,10 @@ class FeishuAdapter(BasePlatformAdapter):
+                         "tag": "markdown",
+                         "content": (
+                             "我已暂停执行。确认前，这条命令不会运行。\n\n"
+-                            f"**风险｜** {summary['risk']}\n"
+-                            f"**范围｜** {summary['scope']}\n"
+-                            f"**命令｜**\n```\n{summary['command']}\n```\n"
+-                            f"**审批 ID｜** `{summary['approval_id']}`"
++                            f"**风险：** {summary['risk']}\n"
++                            f"**范围：** {summary['scope']}\n"
++                            f"**命令：**\n```\n{summary['command']}\n```\n"
++                            f"**审批 ID：** `{summary['approval_id']}`"
+                         ),
+                     },
+                     {
+diff --git a/gateway/platforms/qqbot/keyboards.py b/gateway/platforms/qqbot/keyboards.py
+index 01c671b7b..f71d4aa2b 100644
+--- a/gateway/platforms/qqbot/keyboards.py
++++ b/gateway/platforms/qqbot/keyboards.py
+@@ -311,13 +311,13 @@ def _build_exec_text(req: ApprovalRequest) -> str:
+     lines: List[str] = [f"🧯 **命令需要审批｜{summary['risk_pill']}**", ""]
+     lines.append("我已暂停执行。确认前，这条命令不会运行。")
+     lines.append("")
+-    lines.append(f"⚠️ 风险｜{summary['risk']}")
+-    lines.append(f"📍 范围｜{summary['scope']}")
++    lines.append(f"⚠️ 风险：{summary['risk']}")
++    lines.append(f"📍 范围：{summary['scope']}")
+     if req.cwd:
+         lines.append(f"📁 目录｜{req.cwd}")
+     if req.command_preview:
+-        lines.append(f"💻 命令｜\n```\n{summary['command'][:300]}\n```")
+-    lines.append(f"🔖 审批 ID｜`{summary['approval_id']}`")
++        lines.append(f"💻 命令：\n```\n{summary['command'][:300]}\n```")
++    lines.append(f"🔖 审批 ID：`{summary['approval_id']}`")
+     lines.append("")
+     lines.append(f"⏱️ 超时｜{req.timeout_sec} 秒")
+     return "\n".join(lines)
+diff --git a/gateway/platforms/weixin_delivery_governor.py b/gateway/platforms/weixin_delivery_governor.py
+index 2e71b9707..8bbf99398 100644
+--- a/gateway/platforms/weixin_delivery_governor.py
++++ b/gateway/platforms/weixin_delivery_governor.py
+@@ -685,15 +685,23 @@ def friendly_card(
+ ) -> str:
+     lines = [
+         title,
++        "────────────────────────",
++        "📌 当前情况",
++        _sanitize_user_visible(result),
+         "",
+-        "【状态】",
+-        f"动作｜{_sanitize_user_visible(action)}",
+-        f"结果｜{_sanitize_user_visible(result)}",
+-        f"影响｜{_sanitize_user_visible(impact)}",
+-        f"边界｜{_sanitize_user_visible(boundary)}",
++        "🔧 我已处理",
++        _sanitize_user_visible(action),
++        "",
++        "🧭 影响范围",
++        _sanitize_user_visible(impact),
++        "",
++        "🔒 安全边界",
++        _sanitize_user_visible(boundary),
+     ]
+-    lines.extend(_sanitize_user_visible(line) for line in (extra_status or []))
+-    lines.extend(["", "【下一步】", _sanitize_user_visible(next_step)])
++    cleaned_extra = [_sanitize_user_visible(line) for line in (extra_status or []) if line]
++    if cleaned_extra:
++        lines.extend(["", "✨ 补充说明", *cleaned_extra])
++    lines.extend(["", "🌿 接下来", _sanitize_user_visible(next_step)])
+     return "\n".join(lines)
+ 
+ 
+diff --git a/gateway/run.py b/gateway/run.py
+index 9ca2b0e23..c02cc12f5 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -53,6 +53,9 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
+ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
+ from gateway.friendly_messages import (
++    CARD_DIVIDER,
++    ensure_friendly_outbound,
++    friendly_card,
+     is_continue_only_reply,
+     is_status_query_reply,
+     looks_like_ordinary_reply_card,
+@@ -70,6 +73,8 @@ from gateway.friendly_messages import (
+     render_pairing_rate_limited,
+     render_ordinary_reply,
+     render_persona_reply,
++    render_runtime_issue_notice,
++    render_empty_response_notice,
+     render_task_started,
+     render_task_progress,
+     render_telegram_topic_new_header,
+@@ -2607,24 +2612,22 @@ class GatewayRunner:
+             thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
+             if self._queue_during_drain_enabled():
+                 self._queue_or_replace_pending_event(session_key, event)
+-                message = (
+-                    f"⏳ 网关正在{self._status_action_zh()}｜消息已进入下一轮队列\n\n"
+-                    "【状态】\n"
+-                    "动作｜已保留你的最新消息\n"
+-                    "结果｜网关恢复后会自动继续处理\n"
+-                    "影响｜不会丢消息，也不会重复刷屏\n"
+-                    "边界｜当前轮次不会再追加新任务\n\n"
+-                    "【下一步】\n请等待网关恢复；恢复后我会继续处理队列中的消息。"
++                message = friendly_card(
++                    f"⏳ 网关正在{self._status_action_zh()}｜消息已进入下一轮队列",
++                    action="已保留你的最新消息",
++                    result="网关恢复后会自动继续处理",
++                    impact="不会丢消息，也不会重复刷屏",
++                    boundary="当前轮次不会再追加新任务",
++                    next_step="请等待网关恢复；恢复后我会继续处理队列中的消息。",
+                 )
+             else:
+-                message = (
+-                    f"⏳ 网关正在{self._status_action_zh()}｜暂不接收新轮次\n\n"
+-                    "【状态】\n"
+-                    "动作｜已拒绝本次追加输入\n"
+-                    "结果｜当前会话正在收尾\n"
+-                    "影响｜请稍后重发，避免状态切换时丢失上下文\n"
+-                    "边界｜不会在收尾阶段启动第二个任务\n\n"
+-                    "【下一步】\n等网关恢复后再发送这条消息。"
++                message = friendly_card(
++                    f"⏳ 网关正在{self._status_action_zh()}｜暂不接收新轮次",
++                    action="已拒绝本次追加输入",
++                    result="当前会话正在收尾",
++                    impact="请稍后重发，避免状态切换时丢失上下文",
++                    boundary="不会在收尾阶段启动第二个任务",
++                    next_step="等网关恢复后再发送这条消息。",
+                 )
+ 
+             await adapter._send_with_retry(
+@@ -7840,15 +7843,7 @@ class GatewayRunner:
+             # prefill, empty-retry, fallback).  Sending the raw sentinel
+             # looks like a bug; a short explanation is more helpful.
+             if response == "(empty)":
+-                response = (
+-                    "⚠️ 模型本轮没有返回可展示内容\n\n"
+-                    "【状态】\n"
+-                    "动作｜已完成工具结果处理\n"
+-                    "结果｜没有生成可发送的正文\n"
+-                    "影响｜本轮不会展示空白或内部占位符\n"
+-                    "边界｜不会把原始模型空响应直接发给你\n\n"
+-                    "【下一步】\n请重试一次，或换一种问法；如果连续发生，我会保留诊断线索。"
+-                )
++                response = render_empty_response_notice(user_config)
+             agent_messages = agent_result.get("messages", [])
+             _response_time = time.time() - _msg_start_time
+             _api_calls = agent_result.get("api_calls", 0)
+@@ -7934,7 +7929,7 @@ class GatewayRunner:
+                 and not agent_result.get("failed")
+                 and not agent_result.get("already_sent")
+                 and not looks_like_ordinary_reply_card(response)
+-                and "【状态】" not in response
++                and CARD_DIVIDER not in response
+             ):
+                 response = render_ordinary_reply(response, _load_gateway_config())
+             if _footer_line and response and not agent_result.get("already_sent"):
+@@ -8221,11 +8216,9 @@ class GatewayRunner:
+                     )
+                 elif status_code == 400:
+                     status_hint = " The request was rejected by the API."
+-            return (
+-                f"Sorry, I encountered an error ({error_type}).\n"
+-                f"{error_detail}\n"
+-                f"{status_hint}"
+-                "Try again or use /reset to start a fresh session."
++            return render_runtime_issue_notice(
++                f"{error_type}: {error_detail} {status_hint}",
++                _load_gateway_config(),
+             )
+         finally:
+             # Restore session context variables to their pre-handler state
+@@ -13280,7 +13273,14 @@ class GatewayRunner:
+             metadata = {"thread_id": thread_id} if thread_id else None
+             result = await adapter.send(
+                 str(chat_id),
+-                "♻️ 网关已恢复｜会话可以继续\n\n【状态】\n动作｜已完成重启并恢复连接\n结果｜当前会话保持可用\n影响｜无需重新发送上一条消息\n边界｜仅发送一次恢复提示，避免刷屏\n\n【下一步】\n你可以继续对话；如果仍无响应，请发送 /reset。",
++                friendly_card(
++                    "♻️ 网关已恢复｜会话可以继续",
++                    action="已完成重启并恢复连接",
++                    result="当前会话保持可用",
++                    impact="无需重新发送上一条消息",
++                    boundary="仅发送一次恢复提示，避免刷屏",
++                    next_step="你可以继续对话；如果仍无响应，请发送 /reset。",
++                ),
+                 metadata=metadata,
+             )
+             # adapter.send() catches provider errors (e.g. "Chat not found")
+@@ -13321,7 +13321,14 @@ class GatewayRunner:
+         """
+         delivered: set[tuple[str, str, Optional[str]]] = set()
+         skipped = skip_targets or set()
+-        message = "♻️ Hermes 网关已上线｜可以继续使用\n\n【状态】\n动作｜已完成启动检查\n结果｜消息入口已恢复\n影响｜后续消息会正常进入 Hermes\n边界｜只通知配置的主页渠道一次\n\n【下一步】\n你可以继续发送消息；如果正在等待旧任务，请查看任务状态。"
++        message = friendly_card(
++            "♻️ Hermes 网关已上线｜可以继续使用",
++            action="已完成启动检查",
++            result="消息入口已恢复",
++            impact="后续消息会正常进入 Hermes",
++            boundary="只通知配置的主页渠道一次",
++            next_step="你可以继续发送消息；如果正在等待旧任务，请查看任务状态。",
++        )
+ 
+         for platform, adapter in self.adapters.items():
+             home = self.config.get_home_channel(platform)
+@@ -13802,9 +13809,13 @@ class GatewayRunner:
+                 )
+                 if should_notify:
+                     new_output = session.output_buffer[-1000:] if session.output_buffer else ""
+-                    message_text = (
+-                        f"[Background process {session_id} finished with exit code {session.exit_code}~ "
+-                        f"Here's the final output:\n{new_output}]"
++                    message_text = friendly_card(
++                        f"🧩 后台任务已完成｜{session_id}",
++                        action="已捕获后台进程结束状态",
++                        result=f"退出码：{session.exit_code}\n{new_output or '没有新增输出'}",
++                        impact="你可以直接看到结果摘要，不需要阅读原始后台提示",
++                        boundary="只展示最后一段输出；完整记录保留在本地进程日志里",
++                        next_step="如果需要，我可以继续帮你分析这段输出。",
+                     )
+                     adapter = None
+                     for p, a in self.adapters.items():
+@@ -13823,9 +13834,13 @@ class GatewayRunner:
+                 # New output available -- deliver status update (only in "all" mode)
+                 # Skip periodic updates for agent_notify watchers (they only care about completion)
+                 new_output = session.output_buffer[-500:] if session.output_buffer else ""
+-                message_text = (
+-                    f"[Background process {session_id} is still running~ "
+-                    f"New output:\n{new_output}]"
++                message_text = friendly_card(
++                    f"🧩 后台任务仍在运行｜{session_id}",
++                    action="已捕获新的后台输出",
++                    result=new_output or "暂时没有新增输出",
++                    impact="你可以看到阶段性进展，但不会被每一行日志刷屏",
++                    boundary="只在通知模式允许时发送阶段进度",
++                    next_step="我会继续观察后台任务，完成后再给你最终摘要。",
+                 )
+                 adapter = None
+                 for p, a in self.adapters.items():
+@@ -15152,10 +15167,15 @@ class GatewayRunner:
+         def _status_callback_sync(event_type: str, message: str) -> None:
+             if not _status_adapter or not _run_still_current():
+                 return
++            user_message = ensure_friendly_outbound(
++                message,
++                category="status",
++                config=user_config,
++            )
+             _fut = safe_schedule_threadsafe(
+                 _status_adapter.send(
+                     _status_chat_id,
+-                    message,
++                    user_message,
+                     metadata=_status_thread_metadata,
+                 ),
+                 _loop_for_step,
+@@ -15223,7 +15243,7 @@ class GatewayRunner:
+                 )
+             except Exception as exc:
+                 return {
+-                    "final_response": f"⚠️ Provider authentication failed: {exc}",
++                    "final_response": render_runtime_issue_notice(exc, user_config),
+                     "messages": [],
+                     "api_calls": 0,
+                     "tools": [],
+@@ -15330,10 +15350,15 @@ class GatewayRunner:
+                     return
+                 if already_streamed or not _status_adapter or not str(text or "").strip():
+                     return
++                user_message = ensure_friendly_outbound(
++                    text,
++                    category="assistant",
++                    config=user_config,
++                )
+                 safe_schedule_threadsafe(
+                     _status_adapter.send(
+                         _status_chat_id,
+-                        text,
++                        user_message,
+                         metadata=_status_thread_metadata,
+                     ),
+                     _loop_for_step,
+@@ -15431,10 +15456,15 @@ class GatewayRunner:
+             def _deliver_bg_review_message(message: str) -> None:
+                 if not _status_adapter or not _run_still_current():
+                     return
++                user_message = ensure_friendly_outbound(
++                    message,
++                    category="status",
++                    config=user_config,
++                )
+                 safe_schedule_threadsafe(
+                     _status_adapter.send(
+                         _status_chat_id,
+-                        message,
++                        user_message,
+                         metadata=_status_thread_metadata,
+                     ),
+                     _loop_for_step,
+diff --git a/tests/cron/test_scheduler.py b/tests/cron/test_scheduler.py
+index ba48ea53e..c5093d0d7 100644
+--- a/tests/cron/test_scheduler.py
++++ b/tests/cron/test_scheduler.py
+@@ -465,11 +465,15 @@ class TestDeliverResultWrapping:
+         send_mock.assert_called_once()
+         sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+         assert "🌿 定时任务已完成｜daily-report" in sent_content
+-        assert "【状态】" in sent_content
+-        assert "动作｜已完成本轮自动执行并发送结果" in sent_content
+-        assert "结果｜Here is today's summary." in sent_content
++        assert "────────────────────────" in sent_content
++        assert "📌 当前情况" in sent_content
++        assert "🔧 我已处理" in sent_content
++        assert "已完成本轮自动执行并发送结果" in sent_content
+         assert "Here is today's summary." in sent_content
+-        assert "【下一步】" in sent_content
++        assert "【状态】" not in sent_content
++        assert "动作｜" not in sent_content
++        assert "Here is today's summary." in sent_content
++        assert "🌿 接下来" in sent_content
+         assert "Cronjob Response" not in sent_content
+         assert "job_id" not in sent_content
+         assert "To stop or manage this job" not in sent_content
+@@ -637,10 +641,12 @@ class TestDeliverResultWrapping:
+             "RuntimeError: HTTP 502 ret=-2 Traceback: boom",
+         )
+ 
+-        assert "【状态】" in card
+-        assert "【下一步】" in card
++        assert "────────────────────────" in card
++        assert "🌿 接下来" in card
+         assert "⚠️ 这轮任务没跑完｜daily" in card
+-        assert "动作｜已记录失败并停止本轮自动补发" in card
++        assert "已记录失败并停止本轮自动补发" in card
++        assert "【状态】" not in card
++        assert "动作｜" not in card
+         assert "RuntimeError" not in card
+         assert "HTTP 502" not in card
+         assert "ret=-2" not in card
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+index 91aea3a64..bdffec263 100644
+--- a/tests/gateway/test_friendly_messages.py
++++ b/tests/gateway/test_friendly_messages.py
+@@ -1,6 +1,7 @@
+ """Regression tests for gateway friendly-message contracts."""
+ 
+ from gateway.friendly_messages import (
++    ensure_friendly_outbound,
+     is_continue_only_reply,
+     is_status_query_reply,
+     looks_like_ordinary_reply_card,
+@@ -38,7 +39,8 @@ def test_approval_request_uses_friendly_template():
+ 
+     assert "命令需要审批" in text
+     assert "执行临时代码片段" in text
+-    assert "【可选操作】" in text
++    assert "🌿 可选操作" in text
++    assert "【可选操作】" not in text
+     assert "01｜批准本次" in text
+     assert "03｜永久允许" in text
+     assert "Dangerous command requires approval" not in text
+@@ -228,12 +230,30 @@ def test_busy_and_timeout_templates_hide_internal_activity():
+     timeout = render_inactivity_timeout(30, summary)
+ 
+     for text in (busy, timeout):
+-        assert "【状态】" in text
++        assert "────────────────────────" in text
++        assert "📌 当前情况" in text
++        assert "【状态】" not in text
+         assert "iteration" not in text
+         assert "16/90" not in text
+         assert "receiving stream response" not in text
+ 
+ 
++def test_outbound_status_sanitizes_raw_provider_errors():
++    text = ensure_friendly_outbound(
++        "❌ Non-retryable error (HTTP 401): Error code: 401 - {'code': 'INVALID_API_KEY'}; trying fallback...",
++        category="status",
++        config={"friendly": {"persona": {"display_name": "贾维斯"}}},
++    )
++
++    assert text.startswith("⚠️ 处理遇到问题")
++    assert "────────────────────────" in text
++    assert "模型服务鉴权没有通过" in text
++    assert "HTTP 401" not in text
++    assert "INVALID_API_KEY" not in text
++    assert "trying fallback" not in text
++    assert "我是「贾维斯」" in text
++
++
+ def test_ordinary_reply_uses_card_layout_and_urgent_style():
+     normal = render_ordinary_reply(
+         "先做结论\n然后补充原因\n|---|---|\n最后给下一步",
+diff --git a/tests/gateway/test_weixin.py b/tests/gateway/test_weixin.py
+index 1e5dc5457..e964426e0 100644
+--- a/tests/gateway/test_weixin.py
++++ b/tests/gateway/test_weixin.py
+@@ -1,4 +1,4 @@
+-"""Tests for the Weixin platform adapter."""
++﻿"""Tests for the Weixin platform adapter."""
+ 
+ import asyncio
+ import base64
+@@ -427,7 +427,7 @@ class TestWeixinChunkDelivery:
+         assert result.success is True
+         sent_text = send_message_mock.await_args.kwargs["text"]
+         assert "命令需要审批" in sent_text
+-        assert "【可选操作】" in sent_text
++        assert "🌿 可选操作" in sent_text
+         assert "批准本次" in sent_text
+         assert "永久允许" in sent_text
+         assert "Dangerous command requires approval" not in sent_text
+@@ -904,3 +904,4 @@ class TestWeixinContentDedup:
+         assert adapter.handle_message.await_count == 0
+         # is_duplicate should only be called for message_id, never for content
+         assert all("content:" not in str(call) for call in adapter._dedup.is_duplicate.call_args_list)
++

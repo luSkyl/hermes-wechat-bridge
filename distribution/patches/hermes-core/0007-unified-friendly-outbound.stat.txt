@@ -1,0 +1,11 @@
+ cron/scheduler.py                             |  16 ++-
+ gateway/friendly_messages.py                  | 176 +++++++++++++++++++++++---
+ gateway/platforms/base.py                     |   8 +-
+ gateway/platforms/feishu.py                   |   8 +-
+ gateway/platforms/qqbot/keyboards.py          |   8 +-
+ gateway/platforms/weixin_delivery_governor.py |  22 +++-
+ gateway/run.py                                | 116 ++++++++++-------
+ tests/cron/test_scheduler.py                  |  20 ++-
+ tests/gateway/test_friendly_messages.py       |  24 +++-
+ tests/gateway/test_weixin.py                  |   5 +-
+ 10 files changed, 310 insertions(+), 93 deletions(-)

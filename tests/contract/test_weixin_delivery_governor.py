@@ -95,9 +95,9 @@ def test_friendly_card_hides_raw_rate_limit_markers(tmp_path: Path) -> None:
     decision = governor.admit_or_queue("two", target_id="user-1", now=1002)
 
     assert decision.friendly_text is not None
-    assert "【状态】" in decision.friendly_text
-    assert "【下一步】" in decision.friendly_text
+    assert "📌 当前情况" in decision.friendly_text
+    assert "🌿 接下来" in decision.friendly_text
     assert "ret=-2" not in decision.friendly_text
     assert "RuntimeError" not in decision.friendly_text
     assert "Traceback" not in decision.friendly_text
-    assert decision.friendly_text.startswith("◇ 微信发送已进入保护队列")
+    assert decision.friendly_text.startswith("📌 微信发送已进入保护队列")

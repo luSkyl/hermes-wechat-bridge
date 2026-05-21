@@ -45,7 +45,7 @@ def test_http_health_status_simulate_and_notification_contracts() -> None:
         assert delivery_status["enabled"] is True
         assert simulate["status"] == "delivered"
         assert notification["ok"] is True
-        assert "【状态】" in notification["metadata"]["request"]["text"]
+        assert "📌 当前情况" in notification["metadata"]["request"]["text"]
         assert flush["ok"] is True
         assert session_delivery["ok"] is True
     finally:

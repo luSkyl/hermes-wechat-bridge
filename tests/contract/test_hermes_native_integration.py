@@ -51,7 +51,7 @@ def test_generated_wrapper_modules_are_importable_and_governed(tmp_path: Path) -
 
     assert result["ok"] is True
     assert result["metadata"]["governed"] is True
-    assert "【状态】" in result["metadata"]["request"]["text"]
+    assert "📌 当前情况" in result["metadata"]["request"]["text"]
 
 
 def test_send_message_cron_and_guardian_shims_use_friendly_cards(tmp_path: Path, monkeypatch) -> None:
@@ -78,7 +78,7 @@ def test_send_message_cron_and_guardian_shims_use_friendly_cards(tmp_path: Path,
     for result in (direct, cron_fail, cron_recovery, guardian_fail, guardian_recovery):
         assert result["ok"] is True
         text = result["metadata"]["request"]["text"]
-        assert "【状态】" in text
+        assert "📌 当前情况" in text
         assert "ret=-2" not in text
         assert "Traceback" not in text
 
@@ -114,7 +114,7 @@ def test_cli_install_verify_notify_flush_and_queue_status(tmp_path: Path, capsys
     assert main(["notify", "--config", config_path, "--target", "wxid_home", "--text", "hello", "--priority", "high"]) == 0
     notify_payload = json.loads(capsys.readouterr().out)
     assert notify_payload["ok"] is True
-    assert "【状态】" in notify_payload["metadata"]["request"]["text"]
+    assert "📌 当前情况" in notify_payload["metadata"]["request"]["text"]
 
     assert main(["flush", "--config", config_path, "--target", "wxid_home", "--limit", "3"]) == 0
     flush_payload = json.loads(capsys.readouterr().out)
