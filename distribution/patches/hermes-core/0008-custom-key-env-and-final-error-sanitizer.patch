@@ -1,0 +1,230 @@
+diff --git a/agent/credential_pool.py b/agent/credential_pool.py
+index 5047421..7299f5a 100644
+--- a/agent/credential_pool.py
++++ b/agent/credential_pool.py
+@@ -1279,7 +1279,23 @@ def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, p
+ 
+ def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -> bool:
+     if provider != "anthropic":
+-        return False
++        if not provider.startswith(CUSTOM_POOL_PREFIX):
++            return False
++        ordered = sorted(
++            entries,
++            key=lambda entry: (
++                0 if _is_manual_source(entry.source) else 1,
++                entry.priority,
++                entry.label,
++            ),
++        )
++        id_to_idx = {entry.id: idx for idx, entry in enumerate(entries)}
++        changed = False
++        for new_priority, entry in enumerate(ordered):
++            if entry.priority != new_priority:
++                entries[id_to_idx[entry.id]] = replace(entry, priority=new_priority)
++                changed = True
++        return changed
+ 
+     source_rank = {
+         "env:ANTHROPIC_TOKEN": 0,
+@@ -1672,6 +1688,8 @@ def _prune_stale_seeded_entries(entries: List[PooledCredential], active_sources:
+         or entry.source in active_sources
+         or not (
+             entry.source.startswith("env:")
++            or entry.source.startswith("config:")
++            or entry.source == "model_config"
+             or entry.source in {"claude_code", "hermes_pkce"}
+         )
+     ]
+@@ -1716,6 +1734,30 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
+                     },
+                 )
+ 
++        key_env = str(cp_config.get("key_env") or cp_config.get("api_key_env") or "").strip()
++        if key_env:
++            try:
++                env_file = load_env()
++            except Exception:
++                env_file = {}
++            env_api_key = str(env_file.get(key_env) or os.environ.get(key_env) or "").strip()
++            if env_api_key:
++                source = f"env:{key_env}"
++                if not _is_suppressed(pool_key, source):
++                    active_sources.add(source)
++                    changed |= _upsert_entry(
++                        entries,
++                        pool_key,
++                        source,
++                        {
++                            "source": source,
++                            "auth_type": AUTH_TYPE_API_KEY,
++                            "access_token": env_api_key,
++                            "base_url": base_url,
++                            "label": key_env,
++                        },
++                    )
++
+     # Seed from model.api_key if model.provider=='custom' and model.base_url matches
+     try:
+         config = _load_config_safe()
+@@ -1764,6 +1806,7 @@ def load_pool(provider: str) -> CredentialPool:
+         custom_changed, custom_sources = _seed_custom_pool(provider, entries)
+         changed = custom_changed
+         changed |= _prune_stale_seeded_entries(entries, custom_sources)
++        changed |= _normalize_pool_priorities(provider, entries)
+     else:
+         singleton_changed, singleton_sources = _seed_from_singletons(provider, entries)
+         env_changed, env_sources = _seed_from_env(provider, entries)
+
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+index fee77e0..2c50c9f 100644
+--- a/gateway/friendly_messages.py
++++ b/gateway/friendly_messages.py
+@@ -668,6 +668,11 @@ def _contains_raw_error(text: Any) -> bool:
+     return any(marker in lowered for marker in RAW_ERROR_MARKERS)
+ 
+ 
++def contains_raw_error(text: Any) -> bool:
++    """Return True when text contains raw provider/runtime error details."""
++    return _contains_raw_error(text)
++
++
+ def _looks_like_friendly_status_card(text: str) -> bool:
+     clean = str(text or "").strip()
+     if not clean or CARD_DIVIDER not in clean:
+
+diff --git a/gateway/run.py b/gateway/run.py
+index c02cc12..44d021a 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -54,6 +54,7 @@ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
+ from gateway.friendly_messages import (
+     CARD_DIVIDER,
++    contains_raw_error,
+     ensure_friendly_outbound,
+     friendly_card,
+     is_continue_only_reply,
+@@ -7877,6 +7878,12 @@ class GatewayRunner:
+             response = _normalize_empty_agent_response(
+                 agent_result, response, history_len=len(history),
+             )
++            if response or agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
++                response = ensure_friendly_outbound(
++                    response,
++                    category="assistant",
++                    config=user_config,
++                )
+ 
+             # If the agent's session_id changed during compression, update
+             # session_entry so transcript writes below go to the right session.
+@@ -15167,6 +15174,12 @@ class GatewayRunner:
+         def _status_callback_sync(event_type: str, message: str) -> None:
+             if not _status_adapter or not _run_still_current():
+                 return
++            if contains_raw_error(message):
++                logger.debug(
++                    "Suppressing raw provider/runtime status update; "
++                    "the final response will render the friendly failure notice."
++                )
++                return
+             user_message = ensure_friendly_outbound(
+                 message,
+                 category="status",
+@@ -15892,7 +15905,8 @@ class GatewayRunner:
+             _resolved_model = getattr(_agent, "model", None) if _agent else None
+ 
+             if not final_response:
+-                error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
++                error_detail = result.get("error")
++                error_msg = render_runtime_issue_notice(error_detail, user_config) if error_detail else ""
+                 return {
+                     "final_response": error_msg,
+                     "messages": result.get("messages", []),
+
+diff --git a/tests/agent/test_credential_pool.py b/tests/agent/test_credential_pool.py
+index 299567a..081f11f 100644
+--- a/tests/agent/test_credential_pool.py
++++ b/tests/agent/test_credential_pool.py
+@@ -442,6 +442,54 @@ def test_load_pool_falls_back_to_os_environ_when_dotenv_empty(tmp_path, monkeypa
+     assert entry.access_token == "sk-or-from-runtime-env"
+ 
+ 
++def test_custom_pool_seeds_key_env_and_prunes_stale_config_entry(tmp_path, monkeypatch):
++    hermes_home = tmp_path / "hermes"
++    hermes_home.mkdir()
++    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
++    monkeypatch.setenv("OPENAI_API_KEY", "sk-fresh-from-env")
++    (hermes_home / ".env").write_text("OPENAI_API_KEY=sk-fresh-from-dotenv\n")
++    (hermes_home / "config.yaml").write_text(
++        "custom_providers:\n"
++        "- name: ciii_codex\n"
++        "  base_url: https://codex.ciii.club\n"
++        "  key_env: OPENAI_API_KEY\n"
++    )
++    _write_auth_store(
++        tmp_path,
++        {
++            "version": 1,
++            "providers": {},
++            "credential_pool": {
++                "custom:ciii_codex": [
++                    {
++                        "id": "stale",
++                        "label": "ciii_codex",
++                        "auth_type": "api_key",
++                        "priority": 0,
++                        "source": "config:ciii_codex",
++                        "access_token": "sk-stale-from-old-inline-config",
++                        "base_url": "https://codex.ciii.club",
++                    }
++                ]
++            },
++        },
++    )
++
++    from agent.credential_pool import load_pool
++
++    pool = load_pool("custom:ciii_codex")
++    entries = pool.entries()
++
++    assert len(entries) == 1
++    assert entries[0].source == "env:OPENAI_API_KEY"
++    assert entries[0].access_token == "sk-fresh-from-dotenv"
++    assert entries[0].priority == 0
++
++    auth_payload = json.loads((hermes_home / "auth.json").read_text())
++    persisted = auth_payload["credential_pool"]["custom:ciii_codex"]
++    assert [entry["source"] for entry in persisted] == ["env:OPENAI_API_KEY"]
++
++
+ def test_load_pool_removes_stale_seeded_env_entry(tmp_path, monkeypatch):
+     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+index bdffec2..503b27f 100644
+--- a/tests/gateway/test_friendly_messages.py
++++ b/tests/gateway/test_friendly_messages.py
+@@ -254,6 +254,21 @@ def test_outbound_status_sanitizes_raw_provider_errors():
+     assert "我是「贾维斯」" in text
+ 
+ 
++def test_outbound_assistant_sanitizes_raw_provider_errors():
++    text = ensure_friendly_outbound(
++        "⚠️ Error code: 401 - {'code': 'INVALID_API_KEY', 'message': 'Invalid API key'}",
++        category="assistant",
++        config={"friendly": {"persona": {"display_name": "贾维斯"}}},
++    )
++
++    assert text.startswith("⚠️ 处理遇到问题")
++    assert "模型服务鉴权没有通过" in text
++    assert "Error code: 401" not in text
++    assert "INVALID_API_KEY" not in text
++    assert "Invalid API key" not in text
++    assert "我是「贾维斯」" in text
++
++
+ def test_ordinary_reply_uses_card_layout_and_urgent_style():
+     normal = render_ordinary_reply(
+         "先做结论\n然后补充原因\n|---|---|\n最后给下一步",
