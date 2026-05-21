@@ -28,7 +28,44 @@ RAW_ERROR_PATTERNS = (
 )
 
 ASSISTANT_NAME = "贾维斯"
-DIVIDER = "────────────────────────"
+DIVIDER_CHAR = "─"
+DIVIDER_MIN_LENGTH = 12
+DIVIDER_MAX_LENGTH = 24
+DIVIDER = DIVIDER_CHAR * DIVIDER_MAX_LENGTH
+_DIVIDER_RE = re.compile(rf"^{re.escape(DIVIDER_CHAR)}{{{DIVIDER_MIN_LENGTH},40}}$")
+
+
+def _divider_content_length(parts: Iterable[Any]) -> int:
+    total = 0
+    for part in parts:
+        if part is None:
+            continue
+        if isinstance(part, (list, tuple, set)):
+            total += _divider_content_length(part)
+            continue
+        total += len(str(part).strip())
+    return total
+
+
+def divider_for(*parts: Any) -> str:
+    total = _divider_content_length(parts)
+    if total <= 80:
+        length = 12
+    elif total <= 180:
+        length = 16
+    elif total <= 360:
+        length = 20
+    else:
+        length = DIVIDER_MAX_LENGTH
+    return DIVIDER_CHAR * length
+
+
+def is_divider_line(line: Any) -> bool:
+    return bool(_DIVIDER_RE.fullmatch(str(line or "").strip()))
+
+
+def contains_divider(text: Any) -> bool:
+    return any(is_divider_line(line) for line in str(text or "").splitlines())
 
 _SEMANTIC_ICONS = {
     "decision": "📍",
@@ -90,9 +127,10 @@ class FriendlyCard:
 
     def render(self) -> str:
         icon = _SEVERITY_ICONS.get(self.severity, _SEVERITY_ICONS["info"])
+        divider = divider_for(self.title, self.summary, self.sections, self.actions, self.footer)
         parts = [
             f"{icon} {sanitize_user_visible(self.title)}",
-            DIVIDER,
+            divider,
             _section_label(self.summary_label),
             sanitize_user_visible(self.summary),
         ]
@@ -286,14 +324,17 @@ def guardian_recovery_card(*, name: str, detail: str = "链路已恢复。") -> 
 
 
 def looks_like_friendly_card(text: str) -> bool:
-    return any(label in text for label in FRIENDLY_CARD_LABELS) and any(
-        text.startswith(icon) for icon in _SEVERITY_ICONS.values()
+    clean = str(text or "").strip()
+    return (
+        contains_divider(clean)
+        and any(label in clean for label in FRIENDLY_CARD_LABELS)
+        and any(clean.startswith(icon) for icon in _SEVERITY_ICONS.values())
     )
 
 
 def looks_like_friendly_reply(text: str) -> bool:
     clean = str(text or "").strip()
-    return clean.startswith(REPLY_CARD_TITLES) and (DIVIDER in clean or looks_like_friendly_card(clean))
+    return clean.startswith(REPLY_CARD_TITLES) and (contains_divider(clean) or looks_like_friendly_card(clean))
 
 
 def sanitize_user_visible(text: Any) -> str:

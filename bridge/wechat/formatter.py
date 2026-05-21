@@ -6,8 +6,9 @@ import re
 
 from bridge.protocol import HermesResponse
 from bridge.runtime.friendly_card import (
-    DIVIDER,
     TRUNCATION_NOTICE,
+    divider_for,
+    is_divider_line,
     URGENCY_NOTICE,
     friendly_reply_card,
     looks_like_friendly_reply,
@@ -103,7 +104,7 @@ def _detail_from(text: str) -> str:
 
 def _decorate_detail(text: str) -> str:
     stripped = text.strip()
-    if stripped == DIVIDER or _looks_structured_reply_line(stripped):
+    if is_divider_line(stripped) or _looks_structured_reply_line(stripped):
         return stripped
     return f"• {stripped}"
 
@@ -116,7 +117,7 @@ def _paragraphs(text: str) -> list[str]:
 def _normalize_reply_line(line: str) -> str:
     clean = str(line or "").strip()
     if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", clean):
-        return DIVIDER
+        return divider_for(clean)
     return clean
 
 

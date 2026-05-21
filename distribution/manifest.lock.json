@@ -2,7 +2,7 @@
     "schema_version": 1,
     "name": "hermes-wechat-distribution",
     "version": "0.1.1",
-    "generated_at": "2026-05-21T09:57:11+08:00",
+    "generated_at": "2026-05-21T17:06:00+08:00",
     "bridge": {
         "repo": "https://github.com/luSkyl/hermes-wechat-bridge.git",
         "package": "hermes-wechat-bridge",
@@ -51,6 +51,16 @@
                 "path": "patches/hermes-core/0007-unified-friendly-outbound.patch",
                 "sha256": "e25b8310558bb3d65f3204e34ca69e04f8fe4dcce4e464330413d01fe88f068f",
                 "description": "Route all WeChat-visible runtime status, cron, guardian, and governor notices through the unified friendly outbound template with raw-error sanitization."
+            },
+            {
+                "path": "patches/hermes-core/0008-custom-key-env-and-final-error-sanitizer.patch",
+                "sha256": "32f6c9d17ee2ba528188dbb275edf06ebe0e0d157d9b5e68ee0168ba4551405e",
+                "description": "Sync custom provider key_env credentials into the runtime credential pool and sanitize final raw provider errors."
+            },
+            {
+                "path": "patches/hermes-core/0009-adaptive-friendly-card-dividers.patch",
+                "sha256": "3464ee6c4fc2c56cd211b221dc25d798455f35fca894919596932d52b8f4e5d0",
+                "description": "Use adaptive friendly-card divider lengths so short WeChat messages stay light and long messages remain readable."
             }
         ]
     },

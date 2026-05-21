@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from bridge.hermes import HermesClient
 from bridge.protocol import HermesResponse
+from bridge.runtime.friendly_card import contains_divider, divider_for
 from bridge.runtime.config import BridgeConfig, HermesConfig, RuntimeConfig, WeChatConfig
 from bridge.runtime.router import GatewayRouter
 from bridge.wechat import WeChatAdapter, WeChatSender
@@ -20,6 +21,15 @@ def _config(tmp_path) -> BridgeConfig:
     )
 
 
+def test_friendly_card_divider_adapts_to_message_length() -> None:
+    short = divider_for("短消息")
+    medium = divider_for("中等消息" * 30)
+    long = divider_for("很长的消息" * 100)
+
+    assert len(short) == 12
+    assert len(short) < len(medium) < len(long) <= 24
+
+
 def test_friendly_reply_uses_card_layout_for_normal_text() -> None:
     response = HermesResponse(text="先做结论\n然后补充原因\n|---|---|\n最后给下一步", session_id="s-1")
 
@@ -34,6 +44,7 @@ def test_friendly_reply_uses_card_layout_for_normal_text() -> None:
     assert "🌿 接下来" in text
     assert "先做结论" in text
     assert looks_like_friendly_reply(text)
+    assert contains_divider(text)
 
 
 def test_friendly_reply_does_not_wrap_existing_card() -> None:

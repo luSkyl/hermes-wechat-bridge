@@ -1,0 +1,282 @@
+diff --git a/gateway/friendly_messages.py b/gateway/friendly_messages.py
+index 2c50c9f..6f3a878 100644
+--- a/gateway/friendly_messages.py
++++ b/gateway/friendly_messages.py
+@@ -19,9 +19,49 @@ from typing import Any, Iterable, Literal, Mapping, Sequence
+ ApprovalDecision = Literal["once", "session", "always", "deny"]
+ 
+ PLAIN_TABLE_DIVIDER = "────────────────────────────────────────"
+-CARD_DIVIDER = "────────────────────────"
++CARD_DIVIDER_CHAR = "─"
++CARD_DIVIDER_MIN_LENGTH = 12
++CARD_DIVIDER_MAX_LENGTH = 24
++CARD_DIVIDER = CARD_DIVIDER_CHAR * CARD_DIVIDER_MAX_LENGTH
++_CARD_DIVIDER_RE = re.compile(
++    rf"^{re.escape(CARD_DIVIDER_CHAR)}{{{CARD_DIVIDER_MIN_LENGTH},{len(PLAIN_TABLE_DIVIDER)}}}$"
++)
+ ORDINARY_REPLY_CARD_TITLES = ("📍 先说结论", "⚠️ 先确认安全")
+ 
++
++def _divider_content_length(parts: Iterable[Any]) -> int:
++    total = 0
++    for part in parts:
++        if part is None:
++            continue
++        if isinstance(part, (list, tuple, set)):
++            total += _divider_content_length(part)
++            continue
++        total += len(str(part).strip())
++    return total
++
++
++def card_divider_for(*parts: Any) -> str:
++    """Return a WeChat-friendly divider length based on card content size."""
++    total = _divider_content_length(parts)
++    if total <= 80:
++        length = 12
++    elif total <= 180:
++        length = 16
++    elif total <= 360:
++        length = 20
++    else:
++        length = CARD_DIVIDER_MAX_LENGTH
++    return CARD_DIVIDER_CHAR * length
++
++
++def is_card_divider_line(line: Any) -> bool:
++    return bool(_CARD_DIVIDER_RE.fullmatch(str(line or "").strip()))
++
++
++def contains_card_divider(text: Any) -> bool:
++    return any(is_card_divider_line(line) for line in str(text or "").splitlines())
++
+ URGENT_KEYWORDS = (
+     "地震",
+     "余震",
+@@ -231,12 +271,13 @@ def render_task_started(
+         title = "🧭 我已接手这件事"
+         first_step = "先判断目标、上下文和需要调用的能力。"
+         emoji = "🔧"
++    divider = card_divider_for(title, intro, clean_goal, first_step)
+     return "\n".join(
+         [
+             title,
+             "",
+             intro,
+-            CARD_DIVIDER,
++            divider,
+             "📌 我理解的目标",
+             clean_goal,
+             "",
+@@ -370,7 +411,8 @@ def render_ordinary_reply(text: str, config: Mapping[str, Any] | None = None) ->
+ def _render_reply_card(*, title: str, intro: str, summary: str, detail: str, closing: str, urgent: bool) -> str:
+     detail_title = "🧭 关键信息" if urgent else "✨ 重点细节"
+     action_title = "📌 下一步" if urgent else "🌿 接下来"
+-    return "\n".join((title, CARD_DIVIDER, intro, "", summary, "", detail_title, detail, "", action_title, closing))
++    divider = card_divider_for(title, intro, summary, detail, closing)
++    return "\n".join((title, divider, intro, "", summary, "", detail_title, detail, "", action_title, closing))
+ 
+ 
+ def _split_reply_summary_and_detail(text: str) -> tuple[str, str]:
+@@ -394,12 +436,12 @@ def _split_reply_summary_and_detail(text: str) -> tuple[str, str]:
+ def _normalize_reply_line(line: str) -> str:
+     clean = str(line or "").strip()
+     if re.fullmatch(r"\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?", clean):
+-        return CARD_DIVIDER
++        return card_divider_for(clean)
+     return clean
+ 
+ 
+ def _format_reply_detail_line(line: str) -> str:
+-    if line == CARD_DIVIDER or _looks_structured_reply_line(line):
++    if is_card_divider_line(line) or _looks_structured_reply_line(line):
+         return line
+     return f"• {line}"
+ 
+@@ -422,7 +464,7 @@ def _looks_urgent(text: str) -> bool:
+ 
+ def looks_like_ordinary_reply_card(text: str) -> bool:
+     clean = str(text or "").strip()
+-    return CARD_DIVIDER in clean and clean.startswith(ORDINARY_REPLY_CARD_TITLES)
++    return contains_card_divider(clean) and clean.startswith(ORDINARY_REPLY_CARD_TITLES)
+ 
+ 
+ def render_digest_report(
+@@ -541,9 +583,18 @@ class FriendlyCard:
+ 
+     def render(self) -> str:
+         title = _sanitize_user_visible(self.title)
++        divider = card_divider_for(
++            title,
++            self.result,
++            self.action,
++            self.impact,
++            self.boundary,
++            self.next_step,
++            self.extra_status,
++        )
+         lines = [
+             title,
+-            CARD_DIVIDER,
++            divider,
+             "📌 当前情况",
+             _sanitize_user_visible(self.result),
+             "",
+@@ -597,10 +648,11 @@ def render_runtime_issue_notice(error: Any, config: Mapping[str, Any] | None = N
+     persona = get_persona(config)
+     raw = str(error or "").strip()
+     public_reason = _public_runtime_issue_reason(raw)
++    divider = card_divider_for(raw, public_reason, persona.display_name)
+     return "\n".join(
+         [
+             "⚠️ 处理遇到问题",
+-            CARD_DIVIDER,
++            divider,
+             f"我是「{persona.display_name}」，我不会把内部错误原样发到聊天里。",
+             "",
+             "📌 当前情况",
+@@ -617,10 +669,11 @@ def render_runtime_issue_notice(error: Any, config: Mapping[str, Any] | None = N
+ 
+ def render_empty_response_notice(config: Mapping[str, Any] | None = None) -> str:
+     persona = get_persona(config)
++    divider = card_divider_for(persona.display_name, "本轮没有可展示内容")
+     return "\n".join(
+         [
+             "⚠️ 本轮没有可展示内容",
+-            CARD_DIVIDER,
++            divider,
+             f"我是「{persona.display_name}」，我已经拦截了空白回复。",
+             "",
+             "📌 当前情况",
+@@ -675,7 +728,7 @@ def contains_raw_error(text: Any) -> bool:
+ 
+ def _looks_like_friendly_status_card(text: str) -> bool:
+     clean = str(text or "").strip()
+-    if not clean or CARD_DIVIDER not in clean:
++    if not clean or not contains_card_divider(clean):
+         return False
+     return clean.startswith((
+         "⚠️",
+@@ -1034,10 +1087,11 @@ def approval_summary(command: str, session_key: str, description: str) -> dict[s
+ 
+ def render_approval_request(command: str, session_key: str, description: str = "dangerous command") -> str:
+     summary = approval_summary(command, session_key, description)
++    divider = card_divider_for(summary['title'], summary['risk'], summary['scope'], summary['command'])
+     return "\n".join(
+         [
+             f"{summary['title']}｜{summary['risk_pill']}",
+-            CARD_DIVIDER,
++            divider,
+             "我已暂停执行。确认前，这条命令不会运行。",
+             "",
+             "📌 判断信息",
+@@ -1279,10 +1333,11 @@ def _progress_context(summary: dict[str, Any] | None) -> tuple[str, str, str]:
+ 
+ def render_task_progress(elapsed_mins: int, activity_summary: dict[str, Any] | None = None) -> str:
+     stage, completed, reason = _progress_context(activity_summary)
++    divider = card_divider_for(stage, completed, reason, elapsed_mins)
+     return "\n".join(
+         (
+             "⏳ 我还在处理这件事",
+-            CARD_DIVIDER,
++            divider,
+             "我是「贾维斯」，正在继续跟进。",
+             "",
+             f"已用时｜约 {elapsed_mins} 分钟",
+
+diff --git a/gateway/run.py b/gateway/run.py
+index 44d021a..2057d70 100644
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -54,6 +54,7 @@ from agent.async_utils import safe_schedule_threadsafe
+ from agent.i18n import t
+ from gateway.friendly_messages import (
+     CARD_DIVIDER,
++    contains_card_divider,
+     contains_raw_error,
+     ensure_friendly_outbound,
+     friendly_card,
+@@ -7936,7 +7937,7 @@ class GatewayRunner:
+                 and not agent_result.get("failed")
+                 and not agent_result.get("already_sent")
+                 and not looks_like_ordinary_reply_card(response)
+-                and CARD_DIVIDER not in response
++                and not contains_card_divider(response)
+             ):
+                 response = render_ordinary_reply(response, _load_gateway_config())
+             if _footer_line and response and not agent_result.get("already_sent"):
+
+diff --git a/tests/gateway/test_friendly_messages.py b/tests/gateway/test_friendly_messages.py
+index 503b27f..5b89e40 100644
+--- a/tests/gateway/test_friendly_messages.py
++++ b/tests/gateway/test_friendly_messages.py
+@@ -1,6 +1,8 @@
+ """Regression tests for gateway friendly-message contracts."""
+ 
+ from gateway.friendly_messages import (
++    card_divider_for,
++    contains_card_divider,
+     ensure_friendly_outbound,
+     is_continue_only_reply,
+     is_status_query_reply,
+@@ -175,7 +177,7 @@ def test_progress_template_hides_internal_activity():
+     )
+ 
+     assert text.startswith("⏳ 我还在处理这件事")
+-    assert "────────────────────────" in text
++    assert contains_card_divider(text)
+     assert "已用时｜约 3 分钟" in text
+     assert "当前阶段｜正在等待模型整理结果" in text
+     assert "为什么会久｜" in text
+@@ -194,7 +196,7 @@ def test_task_started_template_sets_expectations():
+ 
+     assert text.startswith("🧭 我已接手这件事")
+     assert "我是「贾维斯」，你的随身执行伙伴 😊～" in text
+-    assert "────────────────────────" in text
++    assert contains_card_divider(text)
+     assert "📌 我理解的目标" in text
+     assert "⏱️ 下一次反馈" in text
+     assert "35 秒" in text
+@@ -230,7 +232,7 @@ def test_busy_and_timeout_templates_hide_internal_activity():
+     timeout = render_inactivity_timeout(30, summary)
+ 
+     for text in (busy, timeout):
+-        assert "────────────────────────" in text
++        assert contains_card_divider(text)
+         assert "📌 当前情况" in text
+         assert "【状态】" not in text
+         assert "iteration" not in text
+@@ -238,6 +240,15 @@ def test_busy_and_timeout_templates_hide_internal_activity():
+         assert "receiving stream response" not in text
+ 
+ 
++def test_card_divider_adapts_to_message_length():
++    short = card_divider_for("短消息")
++    medium = card_divider_for("中等消息" * 30)
++    long = card_divider_for("很长的消息" * 100)
++
++    assert len(short) == 12
++    assert len(short) < len(medium) < len(long) <= 24
++
++
+ def test_outbound_status_sanitizes_raw_provider_errors():
+     text = ensure_friendly_outbound(
+         "❌ Non-retryable error (HTTP 401): Error code: 401 - {'code': 'INVALID_API_KEY'}; trying fallback...",
+@@ -246,7 +257,7 @@ def test_outbound_status_sanitizes_raw_provider_errors():
+     )
+ 
+     assert text.startswith("⚠️ 处理遇到问题")
+-    assert "────────────────────────" in text
++    assert contains_card_divider(text)
+     assert "模型服务鉴权没有通过" in text
+     assert "HTTP 401" not in text
+     assert "INVALID_API_KEY" not in text
+@@ -280,7 +291,7 @@ def test_ordinary_reply_uses_card_layout_and_urgent_style():
+     )
+ 
+     assert normal.startswith("📍 先说结论")
+-    assert "────────────────────────" in normal
++    assert contains_card_divider(normal)
+     assert "|---|---|" not in normal
+     assert "我是「贾维斯」，你的随身执行伙伴 😊～" in normal
+     assert "✨ 重点细节" in normal
